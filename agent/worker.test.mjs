@@ -19,7 +19,15 @@ test("background goal persists progress and completes across screenshot cycles",
   const records = new Map();
   let modelTurn = 0;
   let captures = 0;
+  const modelPrompts = [];
   const provider = { baseUrl: "https://model.example", apiKey: "x".repeat(24), model: "vision-model" };
+  records.set("knowledge:experience:reply-context", { revision: "1", value: {
+    type: "experience", state: "active", title: "微信消息上下文回复",
+    situation: "收到微信新消息时参考历史上下文", approach: "核对会话并回复", successEvidence: "消息气泡已显示", createdAt: 20,
+  } });
+  records.set("knowledge:experience:weather", { revision: "1", value: {
+    type: "experience", state: "active", title: "天气预报", situation: "查询天气", approach: "打开天气应用", successEvidence: "天气已显示", createdAt: 30,
+  } });
 
   function tool(method, params) {
     if (method === "data.batch") {
@@ -49,6 +57,9 @@ test("background goal persists progress and completes across screenshot cycles",
       return { mime: "image/jpeg", width: 1, height: 1, dataBase64: "c3ludGhldGljLWZyYW1l" };
     }
     if (method === "network.request") {
+      const body = JSON.parse(params.bodyText);
+      modelPrompts.push(body.messages?.map(message => typeof message.content === "string"
+        ? message.content : message.content?.map?.(part => part.text || "").join(" ")).join("\n") || "");
       return modelCall(params, () => {
         modelTurn += 1;
         return modelTurn === 1
@@ -79,6 +90,8 @@ test("background goal persists progress and completes across screenshot cycles",
   assert.equal(waiting.state, "waiting");
   assert.equal(modelTurn, 1);
   assert.equal(captures, 1);
+  assert.match(modelPrompts.at(-1), /微信消息上下文回复/);
+  assert.doesNotMatch(modelPrompts.at(-1), /天气预报/);
   assert.equal(records.get(`agent-runtime:${eventReceiptKey(submission.eventId)}`).value.state, "accepted");
   const duplicateSubmission = deliver(submission);
   assert.equal(duplicateSubmission.duplicate, true);

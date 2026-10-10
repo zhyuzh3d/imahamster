@@ -2,6 +2,7 @@
 // separately so authorization and revocation are checked between effects.
 import { buildChatCompletionRequest, classifyProviderStatus, parseChatCompletionContent, readProviderResponse } from "./llm/provider.mjs";
 import { buildActionContext } from "./cae/context.mjs";
+import { retrieveRelevantExperiences } from "./me/retrieval.mjs";
 import { attachJournalEvents, makeJournalEntry } from "./observability/journal.mjs";
 import { validateScreenAction } from "./ho/decision.mjs";
 import {
@@ -1386,7 +1387,7 @@ function advanceAfterTool(event) {
       provider = config;
       appendTrace("model.ready", { model: provider.model });
       pending = "knowledge-scan";
-      return action("data.scan", { collection: "knowledge", prefix: "experience:", limit: 5 });
+      return action("data.scan", { collection: "knowledge", prefix: "experience:", limit: 100 });
     }
     case "resume-provider": {
       if (!providerValid(result?.value)) return pauseForUser("后台任务无法读取有效模型配置", "model-configuration");
@@ -1415,10 +1416,10 @@ function advanceAfterTool(event) {
       if (!providerValid(result?.value)) throw new Error("后台任务无法读取有效模型配置");
       provider = result.value;
       pending = "knowledge-scan";
-      return action("data.scan", { collection: "knowledge", prefix: "experience:", limit: 5 });
+      return action("data.scan", { collection: "knowledge", prefix: "experience:", limit: 100 });
     }
     case "knowledge-scan": {
-      state.experiences = (result?.items || []).map(item => item.value).filter(value => value && value.state !== "inactive").slice(0, 5);
+      state.experiences = retrieveRelevantExperiences(state.intent, result?.items || [], { limit: 5 });
       if (state.taskType === "event-match" && state.pendingEventMatch) {
         const match = state.pendingEventMatch;
         return requestEventMatch(match.event, match.eventTask, { key: match.inboxKey, revision: match.inboxRevision });
