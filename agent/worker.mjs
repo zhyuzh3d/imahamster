@@ -130,7 +130,8 @@ function parseDecision(text) {
   }
   if (decision.state === "action") {
     const a = decision.action;
-    if (!a || typeof a.target !== "string" || !a.target.trim() || Number(decision.confidence) < 0.88) throw new Error("屏幕动作置信度或目标无效");
+    const confidence = Number(decision.confidence);
+    if (!a || typeof a.target !== "string" || !a.target.trim() || !Number.isFinite(confidence) || confidence < 0.88) throw new Error("屏幕动作置信度或目标无效");
     if (a.type === "tap" && (![a.x, a.y].every(Number.isFinite) || a.x < 0 || a.x > 1 || a.y < 0 || a.y > 1)) throw new Error("点击坐标无效");
     if (a.type === "swipe" && ![a.fromX, a.fromY, a.toX, a.toY].every(v => Number.isFinite(v) && v >= 0 && v <= 1)) throw new Error("滑动坐标无效");
     if (a.type === "input" && (a.focused !== true || !["append", "replace"].includes(a.mode) || typeof a.text !== "string" || !a.text.trim() || a.text.length > 8192)) throw new Error("输入框状态或输入内容无效");
@@ -144,7 +145,10 @@ function parseDecision(text) {
       if (!actionWords.test(a.label)) throw new Error("截图按钮与预期操作不匹配");
     }
   }
-  if (decision.state === "done" && Number(decision.confidence) < 0.92) throw new Error("完成判断置信度不足");
+  if (decision.state === "done") {
+    const confidence = Number(decision.confidence);
+    if (!Number.isFinite(confidence) || confidence < 0.92) throw new Error("完成判断置信度不足");
+  }
   if (decision.state === "ask" && (typeof decision.question !== "string" || !decision.question.trim())) throw new Error("澄清问题无效");
   if (decision.state === "stop" && (typeof decision.reason !== "string" || !decision.reason.trim())) throw new Error("停止原因缺失");
   return decision;

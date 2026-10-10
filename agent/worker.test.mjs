@@ -178,6 +178,42 @@ test("an uncertain screen effect blocks another action and stays recoverable", (
   assert.equal(active.pendingOperationId, operation.operationId);
 });
 
+test("missing model confidence cannot dispatch a screen action", () => {
+  const records = new Map();
+  const provider = { baseUrl: "https://model.example", apiKey: "x".repeat(24), model: "vision-model" };
+  let taps = 0;
+
+  function tool(method, params) {
+    if (method === "data.batch") {
+      for (const item of params.operations) records.set(`${item.collection}:${item.key}`, { value: item.value, revision: "1" });
+      return { results: [] };
+    }
+    if (method === "data.get") return { value: params.key === "provider" ? provider : records.get(`${params.collection}:${params.key}`)?.value };
+    if (method === "interaction.capture") return { mime: "image/jpeg", dataBase64: "c3ludGhldGljLWZyYW1l" };
+    if (method === "network.request") return { status: 200, bodyText: JSON.stringify({ choices: [{ message: { content: JSON.stringify({
+      state: "action", evidence: "合成页面显示按钮", action: { type: "tap", target: "合成按钮", x: 0.5, y: 0.5 },
+    }) } }] }) };
+    if (method === "interaction.tap") { taps += 1; return { accepted: true }; }
+    throw new Error(`Unexpected tool: ${method}`);
+  }
+
+  function deliver(event) {
+    let output = globalThis.onHaminnEvent(event);
+    for (let turn = 0; output?.actions?.length && turn < 16; turn += 1) {
+      const call = output.actions[0];
+      try { output = globalThis.onHaminnEvent({ type: "tool.result", callId: call.callId, ok: true, result: tool(call.method, call.params) }); }
+      catch (error) { output = globalThis.onHaminnEvent({ type: "tool.result", callId: call.callId, ok: false, error: { message: error.message } }); }
+    }
+    return output;
+  }
+
+  const result = deliver({ type: "goal.submit", intent: "点击合成测试按钮" });
+  const active = records.get("agent-runtime:active-goal").value;
+  assert.equal(result.state, "failed");
+  assert.equal(taps, 0);
+  assert.equal(records.get(`tasks:t:${active.taskId}`).value.state, "failed");
+});
+
 test("paused goals stay paused on Worker start and accept new goals into the queue", () => {
   const records = new Map();
   const paused = { goalId: "goal-paused", taskId: "task-paused", runId: "run-paused",
