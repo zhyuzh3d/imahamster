@@ -98,6 +98,53 @@ export class AgentStore {
     return task;
   }
 
+  async createTaskPlan(goalId, specifications) {
+    if (!Array.isArray(specifications) || specifications.length < 1 || specifications.length > 32) {
+      throw new RangeError("A Task plan must contain 1 to 32 tasks");
+    }
+    const goalKey = `g:${goalId}`;
+    const goal = await this.get(COLLECTIONS.GOALS, goalKey);
+    if (!goal || goal.value.state !== GoalState.ACTIVE) throw new Error("Task plan requires an active Goal");
+
+    const at = this.now();
+    const taskIds = specifications.map((specification) => specification?.taskId || this.id());
+    if (new Set(taskIds).size !== taskIds.length) throw new TypeError("Task plan contains duplicate task IDs");
+    const tasks = specifications.map((specification, index) => {
+      if (!specification || typeof specification !== "object") throw new TypeError(`Task ${index} is invalid`);
+      const dependencies = specification.dependencies || [];
+      if (!Array.isArray(dependencies) || dependencies.some((dependencyIndex) =>
+        !Number.isInteger(dependencyIndex) || dependencyIndex < 0 || dependencyIndex >= index)) {
+        throw new TypeError(`Task ${index} dependencies must reference earlier tasks in this plan`);
+      }
+      const task = validateTask({
+        schemaVersion: 1,
+        taskId: taskIds[index],
+        goalId,
+        runId: specification.runId || this.id(),
+        revision: 1,
+        kind: specification.kind || "work",
+        objective: specification.objective || goal.value.intent,
+        state: TaskState.READY,
+        dependencies: [...new Set(dependencies.map((dependencyIndex) => taskIds[dependencyIndex]))],
+        objectKey: specification.objectKey || null,
+        progress: "",
+        waiting: null,
+        resultRefs: [],
+        createdAt: at,
+        updatedAt: at,
+      });
+      return task;
+    });
+
+    const operations = tasks.map((task) => ({ op: "put", collection: COLLECTIONS.TASKS,
+      key: `t:${task.taskId}`, expectedRevision: "absent", value: task }));
+    operations.push({ op: "put", collection: COLLECTIONS.GOALS, key: goalKey,
+      expectedRevision: goal.revision,
+      value: { ...goal.value, revision: goal.value.revision + 1, lastTaskCreatedAt: at, updatedAt: at } });
+    await this.batch(operations);
+    return tasks;
+  }
+
   async setGoalState(goalId, nextState) {
     if (![GoalState.ACTIVE, GoalState.PAUSED, GoalState.CANCELLED].includes(nextState)) {
       throw new TypeError("Goal state transition is invalid");

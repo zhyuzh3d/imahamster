@@ -113,6 +113,26 @@ test("task dependencies reject missing records and cycles", async () => {
   ]), /cycle/);
 });
 
+test("a decomposed Task plan is committed atomically with an executable dependency order", async () => {
+  const data = fakeData();
+  const store = new AgentStore(data, { id: (() => { let id = 0; return () => `plan-${++id}`; })() });
+  const goal = await store.createGoal("收集资讯后整理摘要", { goalId: "goal-plan" });
+  const tasks = await store.createTaskPlan(goal.goalId, [
+    { objective: "读取指定资讯来源" },
+    { objective: "整理已读取内容", dependencies: [0] },
+    { objective: "保存摘要", dependencies: [1] },
+  ]);
+
+  assert.deepEqual(tasks.map((task) => task.dependencies), [[], [tasks[0].taskId], [tasks[1].taskId]]);
+  assert.deepEqual((await store.listReadyTasks()).items.map((record) => record.value.taskId), [tasks[0].taskId]);
+  await assert.rejects(() => store.createTaskPlan(goal.goalId, [
+    { taskId: "invalid-a", dependencies: [0] },
+  ]), /earlier tasks/);
+  assert.equal((await store.listTasks(goal.goalId)).items.length, 3,
+    "an invalid plan must not leave partially created tasks");
+  await assert.rejects(() => store.createTaskPlan(goal.goalId, Array.from({ length: 33 }, () => ({}))), /1 to 32/);
+});
+
 test("scheduler and dispatch honor Goal state and dependency completion", async () => {
   const data = fakeData();
   const store = new AgentStore(data, { id: (() => { let id = 0; return () => `scheduled-${++id}`; })() });
