@@ -834,12 +834,16 @@
       if (actionName === "pause") {
         await stopWorkerAndWait();
         const saved = await saveWorkerControlState("paused", "paused");
-        setMessage(saved ? "后台任务已暂停，进度已保存。" : "后台 Worker 已停止；没有活动任务需要暂停。", "success");
+        const summary = saved ? "后台任务已暂停，进度已保存。" : "后台 Worker 已停止；没有活动任务需要暂停。";
+        if (saved) await saveLastResult({ status: "paused", summary, finishedAt: Date.now() });
+        setMessage(summary, "success");
       } else if (actionName === "cancel") {
         await stopWorkerAndWait();
         const saved = await saveWorkerControlState("cancelled", "cancelled");
         await clearQueuedGoals();
-        setMessage(saved ? "所有后台任务已取消。" : "后台 Worker 已停止，排队任务已清除。", "success");
+        const summary = saved ? "所有后台任务已取消。" : "后台 Worker 已停止，排队任务已清除。";
+        await saveLastResult({ status: "cancelled", summary, finishedAt: Date.now() });
+        setMessage(summary, "success");
       } else if (actionName === "resume") {
         const active = await haminn.data.get({ collection: "agent-runtime", key: "active-goal" });
         if (!active?.value || !["active", "running", "waiting", "paused"].includes(active.value.state)) {
@@ -856,7 +860,9 @@
           current = await haminn.workers.status();
         }
         if (current?.state !== "running") throw new Error("后台 Worker 启动超时；任务仍保存在本机。");
-        setMessage("后台任务已继续；正在重新观察屏幕并恢复进度。", "success");
+        const summary = "后台任务已继续；正在重新观察屏幕并恢复进度。";
+        await saveLastResult({ status: "running", summary, goalIntent: active.value.intent, acceptedAt: Date.now() });
+        setMessage(summary, "success");
       }
     } catch (error) {
       setMessage(error.message || "后台任务控制失败。", "error");
