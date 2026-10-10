@@ -87,10 +87,19 @@ function providerValid(value) {
 
 function providerRequest(frame) {
   const endpoint = `${provider.baseUrl.replace(/\/+$/, "")}${provider.endpointPath || "/v1/chat/completions"}`;
+  const operation = state.pendingOperationId ? state.pendingOperation : null;
+  const operationContext = operation ? `\n待核实操作记录：${JSON.stringify({
+    status: operation.status || "unknown",
+    kind: operation.kind || "",
+    target: String(operation.target || "").slice(0, 160),
+    label: String(operation.label || "").slice(0, 80),
+    intendedContent: String(operation.intendedContent || "").slice(0, 1200),
+    bridgeAccepted: operation.result?.accepted === true,
+  })}。Bridge accepted 只表示收到派发请求，不等于界面效果已发生；必须结合当前截图核实。` : "";
   const messages = [
     { role: "system", content: SYSTEM_PROMPT },
     { role: "user", content: [
-      { type: "text", text: `用户目标：${state.intent}\n任务已运行 ${state.step} 步。上次进展：${state.progress || "尚未开始"}。结合当前截图和进展判断下一步。若已完成，给出可见证据。动作坐标使用 0 到 1 的归一化坐标。若存在上一步待核实操作，必须给出 operationResult：verified（截图证明生效）、not-executed（截图证明未发生）或 unknown（无法判断）；unknown 时只能等待、询问或停止。格式：{"state":"action|wait|ask|done|stop","confidence":0.0,"evidence":"截图证据","operationResult":"verified|not-executed|unknown","action":{"type":"tap|swipe|input|back|home","target":"目标","label":"按钮文字","x":0,"y":0,"fromX":0,"fromY":0,"toX":0,"toY":0,"durationMs":400,"text":"输入文本","mode":"replace","focused":true,"effect":"none|send|submit|publish","visibleTarget":"截图中的对象","visibleContent":"截图中的完整正文"},"waitMs":5000,"question":"","reason":"","memory":""}` },
+      { type: "text", text: `用户目标：${state.intent}\n任务已运行 ${state.step} 步。上次进展：${state.progress || "尚未开始"}。${operationContext}\n结合当前截图和进展判断下一步。若已完成，给出可见证据。动作坐标使用 0 到 1 的归一化坐标。若存在上一步待核实操作，必须给出 operationResult：verified（截图证明生效）、not-executed（截图证明未发生）或 unknown（无法判断）；unknown 时只能等待、询问或停止。格式：{"state":"action|wait|ask|done|stop","confidence":0.0,"evidence":"截图证据","operationResult":"verified|not-executed|unknown","action":{"type":"tap|swipe|input|back|home","target":"目标","label":"按钮文字","x":0,"y":0,"fromX":0,"fromY":0,"toX":0,"toY":0,"durationMs":400,"text":"输入文本","mode":"replace","focused":true,"effect":"none|send|submit|publish","visibleTarget":"截图中的对象","visibleContent":"截图中的完整正文"},"waitMs":5000,"question":"","reason":"","memory":""}` },
       { type: "image_url", image_url: { url: `data:${frame.mime || "image/jpeg"};base64,${frame.dataBase64}` } },
     ] },
   ];

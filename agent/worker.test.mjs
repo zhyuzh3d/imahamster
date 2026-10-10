@@ -214,6 +214,61 @@ test("missing model confidence cannot dispatch a screen action", () => {
   assert.equal(records.get(`tasks:t:${active.taskId}`).value.state, "failed");
 });
 
+test("recovery gives the model pending operation details and does not replay an unknown effect", () => {
+  const records = new Map();
+  const active = {
+    goalId: "goal-recovery", taskId: "task-recovery", runId: "run-recovery",
+    intent: "核实合成消息操作，不要重复发送", state: "active", step: 3, revision: 4,
+    progress: "消息操作回执待核实", pendingOperationId: "operation-recovery",
+    pendingOperation: {
+      operationId: "operation-recovery", status: "returned", kind: "send", target: "Synthetic contact",
+      label: "Send", intendedContent: "Synthetic hello", result: { accepted: true },
+    },
+  };
+  records.set("agent-runtime:active-goal", { value: active, revision: "1" });
+  const provider = { baseUrl: "https://model.example", apiKey: "x".repeat(24), model: "vision-model" };
+  let prompt = "";
+  let taps = 0;
+
+  function tool(method, params) {
+    if (method === "data.get") return params.key === "provider" ? { value: provider } : records.get(`${params.collection}:${params.key}`) || null;
+    if (method === "data.batch") {
+      for (const item of params.operations) records.set(`${item.collection}:${item.key}`, { value: item.value, revision: "2" });
+      return { results: [] };
+    }
+    if (method === "interaction.capture") return { mime: "image/jpeg", dataBase64: "c3ludGhldGljLWZyYW1l" };
+    if (method === "network.request") {
+      const body = JSON.parse(params.bodyText);
+      prompt = body.messages[1].content[0].text;
+      const decision = { state: "wait", confidence: 0.98, operationResult: "unknown", evidence: "截图无法确认合成消息是否已经发送", waitMs: 1000 };
+      return { status: 200, bodyText: JSON.stringify({ choices: [{ message: { content: JSON.stringify(decision) } }] }) };
+    }
+    if (method === "worker.wait") return { waitedMs: params.ms };
+    if (method === "interaction.tap") { taps += 1; return { accepted: true }; }
+    throw new Error(`Unexpected tool: ${method}`);
+  }
+
+  function deliver(event) {
+    let output = globalThis.onHaminnEvent(event);
+    for (let turn = 0; output?.actions?.length && turn < 16; turn += 1) {
+      const call = output.actions[0];
+      try { output = globalThis.onHaminnEvent({ type: "tool.result", callId: call.callId, ok: true, result: tool(call.method, call.params) }); }
+      catch (error) { output = globalThis.onHaminnEvent({ type: "tool.result", callId: call.callId, ok: false, error: { message: error.message } }); }
+    }
+    return output;
+  }
+
+  const result = deliver({ type: "start" });
+  assert.equal(result.state, "waiting");
+  assert.match(prompt, /"status":"returned"/);
+  assert.match(prompt, /Synthetic contact/);
+  assert.match(prompt, /Synthetic hello/);
+  assert.match(prompt, /Bridge accepted 只表示收到派发请求/);
+  assert.equal(taps, 0);
+  assert.equal(records.get("operations:o:operation-recovery").value.status, "unknown");
+  assert.equal(records.get("agent-runtime:active-goal").value.pendingOperationId, "operation-recovery");
+});
+
 test("paused goals stay paused on Worker start and accept new goals into the queue", () => {
   const records = new Map();
   const paused = { goalId: "goal-paused", taskId: "task-paused", runId: "run-paused",
