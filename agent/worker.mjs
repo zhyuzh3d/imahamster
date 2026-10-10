@@ -86,7 +86,7 @@ function providerRequest(frame) {
   const messages = [
     { role: "system", content: SYSTEM_PROMPT },
     { role: "user", content: [
-      { type: "text", text: `用户目标：${state.intent}\n任务已运行 ${state.step} 步。上次进展：${state.progress || "尚未开始"}。结合当前截图和进展判断下一步。若已完成，给出可见证据。动作坐标使用 0 到 1 的归一化坐标。格式：{"state":"action|wait|ask|done|stop","confidence":0.0,"evidence":"截图证据","action":{"type":"tap|swipe|input|back|home","target":"目标","label":"按钮文字","x":0,"y":0,"fromX":0,"fromY":0,"toX":0,"toY":0,"durationMs":400,"text":"输入文本","mode":"replace","focused":true,"effect":"none|send|submit|publish","visibleTarget":"截图中的对象","visibleContent":"截图中的完整正文"},"waitMs":5000,"question":"","reason":"","memory":""}` },
+      { type: "text", text: `用户目标：${state.intent}\n任务已运行 ${state.step} 步。上次进展：${state.progress || "尚未开始"}。结合当前截图和进展判断下一步。若已完成，给出可见证据。动作坐标使用 0 到 1 的归一化坐标。若存在上一步待核实操作，必须给出 operationResult：verified（截图证明生效）、not-executed（截图证明未发生）或 unknown（无法判断）；unknown 时只能等待、询问或停止。格式：{"state":"action|wait|ask|done|stop","confidence":0.0,"evidence":"截图证据","operationResult":"verified|not-executed|unknown","action":{"type":"tap|swipe|input|back|home","target":"目标","label":"按钮文字","x":0,"y":0,"fromX":0,"fromY":0,"toX":0,"toY":0,"durationMs":400,"text":"输入文本","mode":"replace","focused":true,"effect":"none|send|submit|publish","visibleTarget":"截图中的对象","visibleContent":"截图中的完整正文"},"waitMs":5000,"question":"","reason":"","memory":""}` },
       { type: "image_url", image_url: { url: `data:${frame.mime || "image/jpeg"};base64,${frame.dataBase64}` } },
     ] },
   ];
@@ -117,6 +117,12 @@ function parseDecision(text) {
   if (!decision || !["action", "wait", "ask", "done", "stop"].includes(decision.state) ||
       typeof decision.evidence !== "string" || !decision.evidence.trim() || decision.evidence.length > 360) {
     throw new Error("模型决策缺少有效状态或截图证据");
+  }
+  if (state?.pendingOperationId) {
+    if (!["verified", "not-executed", "unknown"].includes(decision.operationResult)) throw new Error("模型必须核实上一步操作结果");
+    if (["action", "done"].includes(decision.state) && decision.operationResult === "unknown") {
+      throw new Error("上一步操作结果不确定，必须先等待或询问，不能继续动作或报告完成");
+    }
   }
   if (decision.state === "action") {
     const a = decision.action;
@@ -184,13 +190,26 @@ function updateGoalAndTask(decision) {
 
 function persistDecision(decision) {
   storeDecision(decision);
+  const operations = updateGoalAndTask(decision);
+  if (state.pendingOperationId) {
+    const operation = state.pendingOperation;
+    operation.status = decision.operationResult === "verified" ? "verified"
+      : decision.operationResult === "not-executed" ? "not-executed" : "unknown";
+    operation.verificationEvidence = decision.evidence;
+    operation.checkedAt = Date.now();
+    state.pendingOperation = operation;
+    if (decision.operationResult !== "unknown") state.pendingOperationId = null;
+    state.lastOperationResult = decision.operationResult;
+    const activeIndex = operations.findIndex(item => item.collection === COLLECTION && item.key === ACTIVE_KEY);
+    if (activeIndex >= 0) operations[activeIndex] = record(COLLECTION, ACTIVE_KEY, state);
+    operations.unshift(record("operations", `o:${operation.operationId}`, operation));
+  }
   pending = "decision-saved";
-  return action("data.batch", { operations: updateGoalAndTask(decision) });
+  return action("data.batch", { operations });
 }
 
-function launchAction(a) {
+function actionToolCall(a) {
   state.pendingAction = a;
-  pending = "action-result";
   const params = a.type === "tap" ? { x: a.x, y: a.y }
     : a.type === "swipe" ? { fromX: a.fromX, fromY: a.fromY, toX: a.toX, toY: a.toY, durationMs: Math.min(2000, Math.max(80, Number(a.durationMs) || 420)) }
       : a.type === "input" ? { text: a.text, mode: a.mode }
@@ -198,6 +217,25 @@ function launchAction(a) {
   const method = a.type === "tap" ? "interaction.tap" : a.type === "swipe" ? "interaction.swipe"
     : a.type === "input" ? "interaction.inputText" : "interaction.globalAction";
   return action(method, params);
+}
+
+function launchAction(a) {
+  const now = Date.now();
+  const operationId = `o-${state.goalId}-${state.step}-${Math.random().toString(36).slice(2, 8)}`;
+  state.pendingAction = a;
+  state.pendingOperationId = operationId;
+  state.pendingOperation = {
+    schemaVersion: 1, operationId, goalId: state.goalId, taskId: state.taskId,
+    revision: state.step, kind: a.effect && a.effect !== "none" ? a.effect : a.type,
+    status: "prepared", target: a.target, label: a.label || null,
+    intendedContent: a.text || a.visibleContent || null,
+    createdAt: now, updatedAt: now,
+  };
+  pending = "action-prepared";
+  return action("data.batch", { operations: [
+    record("operations", `o:${operationId}`, state.pendingOperation),
+    record(COLLECTION, ACTIVE_KEY, state),
+  ] });
 }
 
 function beginObserve() {
@@ -289,9 +327,21 @@ function advanceAfterTool(event) {
     case "action-result":
       state.lastActionResult = result;
       state.progress = `已执行第 ${state.step} 步，准备截图核验结果。`;
-      return persist("action-saved");
+      if (state.pendingOperation) {
+        state.pendingOperation.status = "returned";
+        state.pendingOperation.result = result;
+        state.pendingOperation.updatedAt = Date.now();
+      }
+      pending = "action-saved";
+      return action("data.batch", { operations: [
+        ...(state.pendingOperation ? [record("operations", `o:${state.pendingOperation.operationId}`, state.pendingOperation)] : []),
+        record(COLLECTION, ACTIVE_KEY, state),
+      ] });
     case "action-saved":
       return beginObserve();
+    case "action-prepared":
+      pending = "action-result";
+      return actionToolCall(state.pendingAction);
     case "wait-result": return { state: "waiting", progress: state?.progress || "等待下一轮观察" };
     case "resume-saved": case "tick-saved": return beginObserve();
     default: return { state: "idle" };
@@ -335,9 +385,16 @@ globalThis.onHaminnEvent = event => {
   } catch (error) {
     if (state) {
       const reason = String(error?.message || error).slice(0, 360);
+      if (state.pendingOperationId && state.pendingOperation) {
+        state.pendingOperation.status = "unknown";
+        state.pendingOperation.error = reason;
+        state.pendingOperation.updatedAt = Date.now();
+      }
       storeDecision({ state: "stop", reason, evidence: reason });
       pending = "error-save";
-      return action("data.batch", { operations: updateGoalAndTask(state.lastDecision) });
+      const operations = updateGoalAndTask(state.lastDecision);
+      if (state.pendingOperation) operations.unshift(record("operations", `o:${state.pendingOperation.operationId}`, state.pendingOperation));
+      return action("data.batch", { operations });
     }
     return { state: "failed", error: String(error?.message || error).slice(0, 360) };
   }
