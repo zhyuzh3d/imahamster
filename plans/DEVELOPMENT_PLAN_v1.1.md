@@ -515,4 +515,4 @@ JNI/CMake 引入后补受影响 ABI 的 native 构建与对应运行时测试；
 ## 11. 实施记录
 
 - **P0.3（部分通过，2026-10-10）**：上游 QuickJS JNI 已纳入 HaminnApp Debug 构建，并在 CMA-AN00 / arm64 手机上通过 5 项定向 instrumentation：ES module 导入、Promise jobs、Unicode、运行时隔离、无限循环中断与内存上限。真机测试发现并修复源码缓冲区未按 QuickJS 要求 NUL 终止的问题。Worker 事件/timer、单独停止、服务生命周期和其他 ABI 尚未实现，因此 P0.3 与阶段 0 尚未整体通过。
-- **ImHamster 数据核心（部分实现，2026-10-10）**：`agent/model.mjs`、`agent/store.mjs` 已实现 Goal/Task 状态、依赖调度、暂停和完成校验、幂等事件收件、操作回执及副作用保留；`node --test agent/model.test.mjs` 通过 6 项。当前还没有接入 UI 或 Worker，不能据此认定 Goal 已在手机执行。
+- **ImHamster 数据核心（部分实现，2026-10-10）**：`agent/model.mjs`、`agent/store.mjs` 已实现 Goal/Task 状态、依赖调度、暂停和完成校验、幂等事件收件、操作回执及副作用保留；`node --test agent/model.test.mjs` 通过 7 项，其中包括暂停与动作准备并发时的 CAS 竞态。当前还没有接入 UI 或 Worker，不能据此认定 Goal 已在手机执行。

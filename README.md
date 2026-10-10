@@ -14,7 +14,7 @@ ImHamster 是普通 Haminn happ，不需要单例。Haminn 通过一个 Android 
 
 ## 代理核心开发状态
 
-`agent/model.mjs` 与 `agent/store.mjs` 开始实现设计文档中的 Goal、Task、事件收件箱和外部操作回执，数据写入当前实例的 `haminn.data`，包括依赖就绪、暂停闸门、CAS 和可重复副作用保留。运行 `node --test agent/model.test.mjs` 可执行核心状态单测。这些模块目前还没有连接到页面或后台 Worker；持续运行与自动恢复能力须待 Haminn Worker 宿主合同完成后才能验收。
+`agent/model.mjs` 与 `agent/store.mjs` 开始实现设计文档中的 Goal、Task、事件收件箱和外部操作回执，数据写入当前实例的 `haminn.data`，包括依赖就绪、暂停闸门、CAS 和可重复副作用保留。运行 `node --test agent/model.test.mjs` 可执行核心状态单测（当前 7 项）。这些模块目前还没有连接到页面或后台 Worker；持续运行与自动恢复能力须待 Haminn Worker 宿主合同完成后才能验收。
 
 ## CodeBestie 请求兼容约定
 
