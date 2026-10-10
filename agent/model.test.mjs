@@ -159,3 +159,30 @@ test("Goal completion requires all Tasks done and persisted evidence", async () 
   await store.createTask(recurring.goalId);
   await assert.rejects(() => store.completeGoal(recurring.goalId, { summary: "已整理", evidenceRefs: ["file:daily"] }), /recurring Goal/);
 });
+
+test("pausing a Goal atomically fences an operation prepared from a stale snapshot", async () => {
+  const base = fakeData();
+  let store;
+  let pauseBeforeNextBatch = false;
+  const data = {
+    ...base,
+    async batch(params) {
+      if (pauseBeforeNextBatch) {
+        pauseBeforeNextBatch = false;
+        await store.setGoalState("goal-race", "paused");
+      }
+      return base.batch(params);
+    },
+  };
+  store = new AgentStore(data, { id: (() => { let id = 0; return () => `race-${++id}`; })() });
+  const goal = await store.createGoal("只允许一次操作", { goalId: "goal-race" });
+  const task = await store.createTask(goal.goalId);
+  await store.transitionTask(task.taskId, "running");
+  pauseBeforeNextBatch = true;
+
+  await assert.rejects(() => store.prepareOperation(task.taskId, { tool: "interaction.tap", intent: "send" }),
+    (error) => error.code === "E_CONFLICT");
+  assert.equal((await store.get(AgentCollections.GOALS, "g:goal-race")).value.state, "paused");
+  assert.equal((await store.get(AgentCollections.TASKS, `t:${task.taskId}`)).value.pendingOperationId, undefined);
+  assert.equal((await data.scan({ collection: AgentCollections.OPERATIONS, prefix: "o:" })).items.length, 0);
+});
