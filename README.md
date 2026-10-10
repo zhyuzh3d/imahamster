@@ -12,6 +12,8 @@ ImHamster 是普通 Haminn happ，不需要单例。Haminn 通过一个 Android 
 
 此流程不读取辅助功能控件树，不调用目标 App 的专用 API，不使用 ADB 输入或 shell 自动化。Haminn 只提供系统级截图和操作原语，Happ 自己决定目标与下一步。截图和指令会发送给已配置的 CodeBestie 服务；页面的知情同意会说明这一点。后台任务依赖 `workers.run`、`screen.interaction` 与模型服务网络授权。暂停会先停止 Worker，再持久化任务状态；继续时重新截图核对未完成操作。取消会停止 Worker、取消当前任务并清空排队目标。
 
+事件驱动任务（EDT）的通知进入 Haminn 持久事件队列；暂停、恢复和取消作为高优先级控制事件进入独立保留配额，积压通知不能占满控制容量。控制当前待命 EDT 时，前台先停止该空闲 Worker，宿主在恢复任务前应用持久控制，再处理尚未匹配的本地通知；已触发的 OST 保持独立生命周期。定时触发目前尚未接入。
+
 ## 代理核心开发状态
 
 `agent/model.mjs` 与 `agent/store.mjs` 定义兼容用的 Goal/Task 数据记录、事件收件箱和外部操作回执；产品术语见[术语表](docs/术语表.md)。`agent/worker.mjs` 是 `haminn.json` 声明的本地后台入口，负责 OST 排队、AL 调度、单步屏幕动作和进展恢复。屏幕动作采用“先持久化 prepared 回执，再派发，后截图核实”的顺序；未知结果会保留未决回执并阻止盲目重放。运行 `node --test agent/model.test.mjs agent/worker.test.mjs` 执行状态与 Worker 编排单测。Haminn HostService 生命周期及合成页面截图、模型判断和按钮操作已有 CMA-AN00 真机证据；真实目标应用、暂停/继续/取消控件真机验收、断电恢复和长时间压力仍需设备验收。

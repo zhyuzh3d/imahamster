@@ -44,7 +44,12 @@
         <span id="worker-state" class="overall-status">检查中</span>
       </div>
       <p id="worker-progress" class="worker-progress">尚无后台任务</p>
+      <div id="worker-event-tasks" class="worker-event-tasks" hidden></div>
       <p id="worker-trace" class="worker-trace" hidden></p>
+      <details id="worker-journal-details" class="worker-journal" hidden>
+        <summary>查看完整过程记录</summary>
+        <pre id="worker-journal-events" class="worker-journal-events">展开后读取事件记录</pre>
+      </details>
       <textarea id="worker-reply" class="worker-reply" rows="2" maxlength="1200" placeholder="有补充信息时写在这里" hidden></textarea>
       <div class="worker-actions">
         <button id="worker-pause" class="button secondary" type="button" disabled>暂停</button>

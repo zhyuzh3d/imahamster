@@ -8,7 +8,10 @@
   const workerPanel = $("#worker-panel");
   const workerStateLine = $("#worker-state");
   const workerProgressLine = $("#worker-progress");
+  const workerEventTasks = $("#worker-event-tasks");
   const workerTraceLine = $("#worker-trace");
+  const workerJournalDetails = $("#worker-journal-details");
+  const workerJournalEvents = $("#worker-journal-events");
   const workerReplyInput = $("#worker-reply");
   const workerPauseButton = $("#worker-pause");
   const workerResumeButton = $("#worker-resume");
@@ -16,9 +19,8 @@
   const API_UA = "Mozilla/5.0 (Linux; Android 15; CMA-AN00) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Mobile Safari/537.36";
   const BASE_BUBBLE_COLOR = "#4c7dff";
   const MAX_TASK_STEPS = 4096;
-  const TASK_TIMEOUT_MS = 4 * 60 * 60_000;
-  const OBSERVATION_TIMEOUT_MS = 24 * 60 * 60_000;
-  const TASK_TIMEOUT_MESSAGE = "整轮任务达到运行时限，已停止；屏幕动作不会在超时后继续。";
+  const SUBMISSION_TIMEOUT_MS = 30 * 60_000;
+  const SUBMISSION_TIMEOUT_MESSAGE = "前台提交准备超过 30 分钟；目标尚未交给后台 Worker。";
   const MAX_WAIT_RETRIES = 8;
   const SETTLE_MS = 2100;
   const SCREENSHOT_TIMEOUT_MS = 40_000;
@@ -37,8 +39,11 @@
   let modelTestFailed = false;
   let lastResult = null;
   let activeTrace = null;
-  let taskDeadlineAt = 0;
+  let workerJournalGoalId = "";
+  let workerJournalLoading = false;
+  let submissionDeadlineAt = 0;
   let workerControlBusy = false;
+  let hoControlModule = null;
 
 
 
@@ -75,6 +80,42 @@
     // model evidence, message drafts, or input text.
     await withTimeout(haminn.data.put({ collection: "screen-interaction", key: "run-trace", value: activeTrace }),
       1500, "轨迹写入超时", "TRACE_WRITE_TIMEOUT").catch(() => {});
+  }
+
+  async function eventFingerprint(value) {
+    const source = JSON.stringify(value);
+    if (globalThis.crypto?.subtle && globalThis.TextEncoder) {
+      const digest = await globalThis.crypto.subtle.digest("SHA-256", new TextEncoder().encode(source));
+      return [...new Uint8Array(digest)].slice(0, 16).map(byte => byte.toString(16).padStart(2, "0")).join("");
+    }
+    let left = 0x811c9dc5;
+    let right = 0x9e3779b9;
+    for (let index = 0; index < source.length; index += 1) {
+      const code = source.charCodeAt(index);
+      left = Math.imul(left ^ code, 0x01000193);
+      right = Math.imul(right ^ code ^ index, 0x85ebca6b);
+    }
+    return `${(left >>> 0).toString(16).padStart(8, "0")}${(right >>> 0).toString(16).padStart(8, "0")}`;
+  }
+
+  async function prepareDispatchEventId(type, identity) {
+    const key = `pending-dispatch:${type}`;
+    const fingerprint = await eventFingerprint(identity);
+    const existing = await haminn.data.get({ collection: "agent-runtime", key });
+    if (existing?.value?.fingerprint === fingerprint && Date.now() - existing.value.createdAt < 10 * 60_000) {
+      return existing.value.eventId;
+    }
+    const random = globalThis.crypto?.randomUUID?.() || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
+    const eventId = `imhamster:${type}:${random}`;
+    await haminn.data.put({ collection: "agent-runtime", key, value: { schemaVersion: 1, eventId, fingerprint, createdAt: Date.now() } });
+    return eventId;
+  }
+
+  async function clearDispatchEventId(type, eventId) {
+    const key = `pending-dispatch:${type}`;
+    const existing = await haminn.data.get({ collection: "agent-runtime", key });
+    if (existing?.value?.eventId !== eventId) return;
+    await haminn.data.delete({ collection: "agent-runtime", key, expectedRevision: existing.revision }).catch(() => {});
   }
 
   function traceSummary(trace = activeTrace) {
@@ -357,13 +398,13 @@
   }
 
   async function captureFrame({ maxEdge = 800, quality = 45, settleMs = SETTLE_MS } = {}) {
-    assertTaskTime();
-    const remaining = remainingTaskMs();
-    const limitedByTask = remaining <= SCREENSHOT_TIMEOUT_MS;
+    assertSubmissionTime();
+    const remaining = remainingSubmissionMs();
+    const limitedBySubmission = remaining <= SCREENSHOT_TIMEOUT_MS;
     const deadline = Date.now() + Math.min(SCREENSHOT_TIMEOUT_MS, remaining);
     const capture = (params) => withTimeout(haminn.interaction.capture(params), Math.max(1, deadline - Date.now()),
-      limitedByTask ? TASK_TIMEOUT_MESSAGE : `屏幕截图超过 ${SCREENSHOT_TIMEOUT_MS / 1000} 秒没有返回，任务已停止。`,
-      limitedByTask ? "TASK_TIMEOUT" : "SCREENSHOT_TIMEOUT");
+      limitedBySubmission ? SUBMISSION_TIMEOUT_MESSAGE : `屏幕截图超过 ${SCREENSHOT_TIMEOUT_MS / 1000} 秒没有返回，已停止本次连通测试。`,
+      limitedBySubmission ? "SUBMISSION_TIMEOUT" : "SCREENSHOT_TIMEOUT");
     let frame = await capture({ settleMs, maxEdge, quality });
     if (frame.dataBase64.length > 155_000 && maxEdge > 640) {
       frame = await capture({ settleMs: 600, maxEdge: 640, quality: 35 });
@@ -390,7 +431,7 @@
         await recordTrace({ phase: "model-retry", attempt, delayMs, code: String(error.code || "network_error").slice(0, 48) });
         setMessage(`模型或网络暂时中断，${Math.ceil(delayMs / 1000)} 秒后自动重试 ${attempt}/${maxAttempts - 1}；屏幕动作尚未重复。`, "wait");
         await sleep(delayMs);
-        assertTaskTime();
+        assertSubmissionTime();
       }
     }
   }
@@ -417,10 +458,10 @@
         }),
         timeoutMs,
       });
-      const bridgeDeadlineMs = Math.min(MODEL_BRIDGE_DEADLINE_MS, timeoutMs + 9_000, remainingTaskMs());
+      const bridgeDeadlineMs = Math.min(MODEL_BRIDGE_DEADLINE_MS, timeoutMs + 9_000, remainingSubmissionMs());
       response = await withTimeout(request, Math.max(1, bridgeDeadlineMs),
-        bridgeDeadlineMs < timeoutMs + 9_000 ? TASK_TIMEOUT_MESSAGE : `${purpose}超过等待时限，任务已停止。`,
-        bridgeDeadlineMs < timeoutMs + 9_000 ? "TASK_TIMEOUT" : "MODEL_REQUEST_TIMEOUT");
+        bridgeDeadlineMs < timeoutMs + 9_000 ? SUBMISSION_TIMEOUT_MESSAGE : `${purpose}超过等待时限，已停止本次连通测试。`,
+        bridgeDeadlineMs < timeoutMs + 9_000 ? "SUBMISSION_TIMEOUT" : "MODEL_REQUEST_TIMEOUT");
     } catch (error) {
       if (error?.code === "MODEL_REQUEST_TIMEOUT" || /timeout|timed out/i.test(error?.message || "") || error?.code === "E_TIMEOUT") {
         await recordTrace({ phase: "model-timeout", purpose, timeoutMs, deadlineMs: Math.min(MODEL_BRIDGE_DEADLINE_MS, timeoutMs + 9_000) });
@@ -439,7 +480,7 @@
     if (!responseText && response.file?.logicalFileId) {
       const logicalFileId = response.file.logicalFileId;
       try {
-        const storedResponse = await taskCall(() => haminn.files.readText({ logicalFileId, maxBytes: 1024 * 1024 }),
+        const storedResponse = await submissionCall(() => haminn.files.readText({ logicalFileId, maxBytes: 1024 * 1024 }),
           5000, "读取模型响应文件超时。", "MODEL_RESPONSE_READ_TIMEOUT");
         responseText = storedResponse.text || "";
       } finally {
@@ -677,18 +718,18 @@
 
   async function requestVisionContent(systemPrompt, text, frame, { step = null, label = "屏幕识别", targetProvider = provider } = {}) {
     const stepLabel = step ? `第 ${step} 轮` : "当前轮";
-    assertTaskTime();
-    const remaining = remainingTaskMs();
-    const limitedByTask = remaining <= VISION_REQUEST_TIMEOUT_MS;
+    assertSubmissionTime();
+    const remaining = remainingSubmissionMs();
+    const limitedBySubmission = remaining <= VISION_REQUEST_TIMEOUT_MS;
     const timeoutMs = Math.max(1, Math.min(VISION_REQUEST_TIMEOUT_MS, remaining));
     await setBubbleState(step ? `识${step}` : "识", "#c18122");
-    setMessage(`${label}${step ? stepLabel : ""}：等待模型识别，最多 ${Math.ceil(timeoutMs / 1000)} 秒；整轮上限 4 小时。`, "wait");
+    setMessage(`${label}${step ? stepLabel : ""}：等待模型识别，最多 ${Math.ceil(timeoutMs / 1000)} 秒。`, "wait");
     try {
       return await requestModel(visionMessages(systemPrompt, text, frame), { timeoutMs, purpose: `${label}${step ? `第${step}轮截图识别` : ""}`, targetProvider });
     } catch (error) {
-      if (limitedByTask && error.code === "MODEL_REQUEST_TIMEOUT") {
-        error.code = "TASK_TIMEOUT";
-        error.message = TASK_TIMEOUT_MESSAGE;
+      if (limitedBySubmission && error.code === "MODEL_REQUEST_TIMEOUT") {
+        error.code = "SUBMISSION_TIMEOUT";
+        error.message = SUBMISSION_TIMEOUT_MESSAGE;
       }
       if (error.code !== "MODEL_REQUEST_TIMEOUT") {
         await recordTrace({ phase: "model-error", step, code: error.code || "request_error" });
@@ -741,26 +782,48 @@
     return value || "待处理";
   }
 
-  function renderWorkerPanel(activeRecord, queuedCount, serviceState) {
+  function renderWorkerPanel(activeRecord, queuedCount, serviceState, serviceError = "", eventTasks = []) {
     if (!workerPanel) return;
     const active = activeRecord?.value || null;
-    const visible = (!!active && !["done", "failed", "cancelled"].includes(active.state)) || queuedCount > 0 || !!active?.trace?.length;
+    const liveEventTasks = eventTasks.map(item => item?.value).filter(item => item && item.state !== "cancelled");
+    const visible = (!!active && !["done", "failed", "cancelled"].includes(active.state)) || queuedCount > 0 || !!active?.trace?.length || liveEventTasks.length > 0;
     workerPanel.hidden = !visible;
     if (!visible) return;
     const stateValue = active?.state || "queued";
-    workerStateLine.textContent = queuedCount && !active ? `${queuedCount} 项排队` : workerStateLabel(stateValue, serviceState);
+    const goalId = String(active?.goalId || "");
+    if (goalId !== workerJournalGoalId) {
+      workerJournalGoalId = goalId;
+      if (workerJournalDetails) {
+        workerJournalDetails.open = false;
+        workerJournalDetails.hidden = !goalId;
+      }
+      if (workerJournalEvents) workerJournalEvents.textContent = "展开后读取事件记录";
+    }
+    const acceptedAt = Number(lastResult?.acceptedAt || 0);
+    const persistedCurrentGoal = !!active && active.intent === lastResult?.goalIntent &&
+      Number(active.createdAt || 0) >= acceptedAt - 5000;
+    const interruptedHandoff = serviceState === "failed" && lastResult?.status === "running" &&
+      (!persistedCurrentGoal || !["done", "failed", "cancelled"].includes(active?.state));
+    const activeEventTask = active?.state === "event-driven";
+    const runningEventCount = liveEventTasks.filter(item => ["active", "registering", "pausing", "cancelling"].includes(item.state)).length;
+    workerStateLine.textContent = interruptedHandoff ? "后台执行中断"
+      : activeEventTask ? "事件任务持续监控中"
+        : queuedCount && !active ? `${queuedCount} 项排队` : workerStateLabel(stateValue, serviceState);
     const lines = [];
+    if (interruptedHandoff) lines.push(`后台 Worker 已异常退出：${String(serviceError || "原因未报告").slice(0, 240)}。请先核对目标应用当前状态，再决定是否重试。`);
     if (active?.intent) lines.push(active.intent.slice(0, 180));
     const actionLoop = active?.actionLoop || active?.loop;
     if (actionLoop) lines.push(`AL ${actionLoop.index || 1}：预估 ${actionLoop.estimatedMinutes || "待定"} 分钟 / 预算 ${actionLoop.budgetMinutes || 15} 分钟`);
-    if (Number.isFinite(active?.goalDeadlineAt) && !["done", "failed", "cancelled"].includes(active.state)) {
+    if (Number.isFinite(active?.goalDeadlineAt) && !["done", "failed", "cancelled", "event-driven"].includes(active.state)) {
       lines.push(`单次目标剩余 ${Math.max(0, Math.ceil((active.goalDeadlineAt - Date.now()) / 60_000))} 分钟（上限 30 分钟）`);
     }
     if (active?.progress) lines.push(active.progress.slice(0, 240));
     if (active?.waiting?.question) lines.push(`需要你确认：${String(active.waiting.question).slice(0, 180)}`);
-    if (workerReplyInput) workerReplyInput.hidden = !active?.waiting?.question;
+    if (runningEventCount) lines.push(`${runningEventCount} 项 EDT 正在等待事件触发`);
+    if (workerReplyInput) workerReplyInput.hidden = !active?.waiting?.question || activeEventTask;
     if (queuedCount) lines.push(`${queuedCount} 项等待执行`);
     workerProgressLine.textContent = lines.join(" · ") || "尚无后台任务";
+    renderEventTasks(eventTasks);
     if (workerTraceLine) {
       const labels = {
       "goal.accepted": "接收 OST", "model.ready": "模型就绪", "screenshot.requested": "请求截图",
@@ -778,8 +841,8 @@
         }
         if (event.phase === "screenshot.received") return `${event.width || "?"}×${event.height || "?"}，${event.bytes || 0} B`;
         if (event.phase === "model.responded") return `HTTP ${event.httpStatus ?? "?"}${event.responseBytes ? `，${event.responseBytes} 字符` : ""}`;
-        if (event.phase === "bridge.dispatched" || event.phase === "bridge.result") return `${event.actionType || "操作"}${event.label ? `「${event.label}」` : ""}${event.phase === "bridge.result" ? `，completed=${event.completed} / accepted=${event.accepted}` : ""}`;
-        if (event.phase === "worker.error" || event.phase === "model.error") return `${event.stage ? `${event.stage}：` : ""}${event.message || "未知错误"}`;
+        if (event.phase === "bridge.dispatched" || event.phase === "bridge.result") return `${event.actionType || "操作"}${event.label ? `「${event.label}」` : ""}${event.phase === "bridge.result" ? `，completed=${event.completed} / accepted=${event.accepted}${event.targeting ? ` / targeting=${event.targeting}` : ""}` : ""}`;
+        if (event.phase === "worker.error" || event.phase === "model.error") return `${event.stage ? `${event.stage}：` : ""}${event.code ? `[${event.code}] ` : ""}${event.message || "未知错误"}`;
         if (event.phase === "recovery.scheduled") return `${event.mode === "reobserve" ? "立即重新观察" : "退避后重试"}（第 ${event.attempt} 次）`;
         if (event.phase === "loop.repetition" || event.phase === "action-loop.repetition" || event.phase === "screen.unchanged") return `连续 ${event.count} 次`;
         if (event.model) return event.model;
@@ -791,27 +854,141 @@
       ).join("\n");
     }
     const busy = workerControlBusy;
-    const activeCanControl = !!active && !["done", "cancelled"].includes(active.state);
+    const activeCanControl = !!active && !["done", "cancelled", "event-driven"].includes(active.state);
     workerPauseButton.disabled = busy || !activeCanControl || active.state === "paused";
     workerResumeButton.disabled = busy || !activeCanControl || (active.state !== "paused" && !active?.waiting?.userRequired && active.state !== "failed" && serviceState === "running");
     workerResumeButton.textContent = active?.state === "failed" || active?.waiting?.userRequired ? "检查后重试" : "继续";
-    workerCancelButton.disabled = busy || (!activeCanControl && queuedCount === 0);
+    workerCancelButton.disabled = busy || (!activeCanControl && queuedCount === 0 && liveEventTasks.length === 0);
+  }
+
+  function eventTaskStateLabel(value) {
+    return ({ active: "监控中", registering: "正在启用", paused: "已暂停", cancelled: "已取消",
+      "needs-app-authorization": "需要 happ 授权", "needs-system-access": "需要 Android 通知授权",
+      "needs-user": "需要补充信息" })[value] || value || "未知状态";
+  }
+
+  function renderEventTasks(items) {
+    if (!workerEventTasks) return;
+    workerEventTasks.replaceChildren();
+    const current = (items || []).map(item => item?.value).filter(Boolean)
+      .filter(item => item.state !== "cancelled");
+    workerEventTasks.hidden = current.length === 0;
+    for (const task of current) {
+      const card = document.createElement("div");
+      card.className = "worker-event-task";
+      const title = document.createElement("div");
+      title.className = "worker-event-task-title";
+      title.textContent = `${eventTaskStateLabel(task.state)} · ${String(task.intent || "事件任务").slice(0, 180)}`;
+      card.append(title);
+      const sourcePackages = task.trigger?.sourcePackages || [];
+      const meta = document.createElement("div");
+      meta.className = "worker-event-task-meta";
+      meta.textContent = `${task.trigger?.description || "等待触发条件"}${sourcePackages.length ? ` · 来源 ${sourcePackages.join("、")}` : ""}${task.missedNotifications ? ` · 遗漏 ${task.missedNotifications} 条` : ""}`;
+      card.append(meta);
+      if (task.lastControlError) {
+        const controlError = document.createElement("div");
+        controlError.className = "worker-event-task-meta worker-event-task-error";
+        controlError.textContent = `控制操作未完成：${String(task.lastControlError).slice(0, 220)}`;
+        card.append(controlError);
+      }
+      if (task.lastQuestion) {
+        const question = document.createElement("div");
+        question.className = "worker-event-task-meta";
+        question.textContent = `需要补充：${String(task.lastQuestion).slice(0, 240)}`;
+        card.append(question);
+        const reply = document.createElement("textarea");
+        reply.className = "worker-event-task-reply";
+        reply.dataset.eventTaskReply = task.eventTaskId;
+        reply.maxLength = 1200;
+        reply.rows = 2;
+        reply.placeholder = "补充触发条件或处理方式";
+        card.append(reply);
+      }
+      const actions = document.createElement("div");
+      actions.className = "worker-event-task-actions";
+      const addAction = (command, label, primary = false) => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = `button ${primary ? "primary" : "secondary"}`;
+        button.textContent = label;
+        button.dataset.eventTaskCommand = command;
+        button.dataset.eventTaskId = task.eventTaskId;
+        actions.append(button);
+      };
+      if (task.state === "active") addAction("pause", "暂停");
+      if (task.state === "registering") {
+        if (task.lastControl === "resume") addAction("resume", "重试启用", true);
+        else addAction("pause", "暂停");
+      }
+      if (task.state === "pausing") addAction("pause", "重试暂停", true);
+      if (task.state === "paused") addAction("resume", "继续", true);
+      if (task.state === "needs-user") addAction("resume", "补充并继续", true);
+      if (["needs-app-authorization", "needs-system-access"].includes(task.state)) addAction("authorize", "授权并继续", true);
+      if (task.state !== "cancelled" && task.state !== "cancelling") addAction("cancel", "取消");
+      if (task.state === "cancelling") addAction("cancel", "重试取消", true);
+      card.append(actions);
+      workerEventTasks.append(card);
+    }
   }
 
   async function readWorkerTaskState() {
-    const [active, queue, service] = await Promise.all([
+    const [active, queue, service, eventTasks] = await Promise.all([
       haminn.data.get({ collection: "agent-runtime", key: "active-goal" }),
       haminn.data.scan({ collection: "inbox", prefix: "q:", limit: 100 }),
       haminn.workers.status(),
+      haminn.data.scan({ collection: "event-tasks", prefix: "ed:", limit: 100 }),
     ]);
-    return { active, queuedCount: Array.isArray(queue?.items) ? queue.items.length : 0, serviceState: service?.state || "stopped" };
+    return { active, queuedCount: Array.isArray(queue?.items) ? queue.items.length : 0,
+      eventTasks: Array.isArray(eventTasks?.items) ? eventTasks.items : [],
+      serviceState: service?.state || "stopped", serviceError: service?.error || "" };
+  }
+
+  async function loadWorkerJournal() {
+    const goalId = workerJournalGoalId;
+    if (!goalId || workerJournalLoading || !window.haminn?.isReady || !workerJournalEvents) return;
+    workerJournalLoading = true;
+    workerJournalEvents.textContent = "正在读取后台事件记录…";
+    try {
+      let afterKey;
+      let pages = 0;
+      let records = [];
+      do {
+        const page = await haminn.data.scan({ collection: "agent-events", prefix: `e:${goalId}:`, limit: 100,
+          ...(afterKey ? { afterKey } : {}) });
+        const items = Array.isArray(page?.items) ? page.items : [];
+        records.push(...items);
+        if (records.length > 500) records = records.slice(-500);
+        afterKey = page?.nextAfterKey || null;
+        pages += 1;
+      } while (afterKey && pages < 10);
+      if (goalId !== workerJournalGoalId) return;
+      const lines = records.map(({ value = {} }) => {
+        const at = Number(value.at);
+        const time = Number.isFinite(at) ? new Date(at).toLocaleTimeString() : "--:--:--";
+        const serialized = JSON.stringify(value);
+        const detail = serialized.length > 1200 ? `${serialized.slice(0, 1200)}…[详情截断]` : serialized;
+        return `${time} #${value.step || 0} ${value.phase || "event"} ${detail}`;
+      });
+      const notice = afterKey ? "达到单次读取上限；以下为已读取事件中的最后 500 条。" : `共 ${records.length} 条事件。`;
+      workerJournalEvents.textContent = lines.length ? `${notice}\n${lines.join("\n")}` : "该 OST 尚无事件记录。";
+    } catch (error) {
+      workerJournalEvents.textContent = `事件记录读取失败：${String(error?.message || error).slice(0, 300)}`;
+    } finally {
+      workerJournalLoading = false;
+    }
   }
 
   async function refreshWorkerPanel() {
     if (!ready || workerControlBusy || !window.haminn?.isReady) return;
     try {
       const task = await readWorkerTaskState();
-      renderWorkerPanel(task.active, task.queuedCount, task.serviceState);
+      const active = task.active?.value;
+      if (lastResult?.status === "running" && active?.state === "done" &&
+          active.intent === lastResult.goalIntent && Number(active.createdAt || 0) >= Number(lastResult.acceptedAt || 0) - 5000) {
+        await saveLastResult({ ...lastResult, status: "done", summary: active.progress || "模型已判断单次目标完成。",
+          finishedAt: Number(active.updatedAt || Date.now()) });
+      }
+      renderWorkerPanel(task.active, task.queuedCount, task.serviceState, task.serviceError, task.eventTasks);
     } catch (_) { /* keep the last known task state during transient Bridge errors */ }
   }
 
@@ -827,44 +1004,114 @@
     throw new Error("后台 Worker 尚未确认停止；任务状态没有修改。");
   }
 
-  async function saveWorkerControlState(nextState, taskState, reply = "") {
-    const active = await haminn.data.get({ collection: "agent-runtime", key: "active-goal" });
-    const value = active?.value;
-    if (!value?.goalId || !value?.taskId) return false;
-    const now = Date.now();
-    const progress = nextState === "paused" ? "用户已暂停任务；继续时先重新截图并核对未完成操作。"
-      : nextState === "cancelled" ? "用户已取消任务。" : nextState === "active" && value.state !== "active" ? "用户已重试任务；先重新观察屏幕并恢复进度。" : value.progress;
-    const operations = [{ op: "put", collection: "agent-runtime", key: "active-goal",
-      expectedRevision: active.revision, value: { ...value, state: nextState, progress,
-        intent: reply ? `${value.intent}；用户补充：${reply.slice(0, 1200)}` : value.intent,
-        waiting: nextState === "active" ? null : value.waiting,
-        pausedAt: nextState === "paused" ? now : undefined, cancelledAt: nextState === "cancelled" ? now : undefined,
-        revision: Number(value.revision || 0) + 1,
-        lastProgressAt: now } }];
-    const goal = await haminn.data.get({ collection: "goals", key: `g:${value.goalId}` });
-    if (goal?.value) operations.push({ op: "put", collection: "goals", key: `g:${value.goalId}`,
-      expectedRevision: goal.revision, value: { ...goal.value, state: nextState, progress,
-        revision: Number(goal.value.revision || 0) + 1, updatedAt: now } });
-    const task = await haminn.data.get({ collection: "tasks", key: `t:${value.taskId}` });
-    if (task?.value) operations.push({ op: "put", collection: "tasks", key: `t:${value.taskId}`,
-      expectedRevision: task.revision, value: { ...task.value, state: taskState, progress,
-        waiting: nextState === "paused" ? { reason: progress, since: now } : null,
-        revision: Number(task.value.revision || 0) + 1, updatedAt: now } });
-    await haminn.data.batch({ operations });
-    return true;
+  async function startWorkerForGoalSubmission() {
+    const current = await readWorkerTaskState();
+    const active = current.active?.value;
+    const goalTerminal = !active || ["done", "failed", "cancelled"].includes(active.state);
+    const learningSettled = !["pending", "running"].includes(active?.learningStatus);
+    // Retire only an idle terminal Worker; never discard an active OST, queued task, or pending ME review.
+    if (current.serviceState === "running" && goalTerminal && learningSettled && current.queuedCount === 0) {
+      await stopWorkerAndWait();
+    }
+    return submissionCall(() => haminn.workers.start(), 12_000,
+      "后台 Worker 启动请求超时。", "WORKER_START_TIMEOUT");
   }
 
-  async function clearQueuedGoals() {
-    let afterKey;
-    while (true) {
-      const page = await haminn.data.scan({ collection: "inbox", prefix: "q:", limit: 100, afterKey });
-      const items = Array.isArray(page?.items) ? page.items : [];
-      if (!items.length) return;
-      await haminn.data.batch({ operations: items.map((item) => ({ op: "delete", collection: "inbox",
-        key: item.key, expectedRevision: item.revision })) });
-      if (items.length < 100) return;
-      afterKey = items[items.length - 1].key;
+  async function ensureWorkerRunningForControl() {
+    let current = await haminn.workers.status();
+    if (current?.state !== "running") current = await startWorkerForGoalSubmission();
+    const deadline = Date.now() + 12_000;
+    while (current?.state !== "running" && Date.now() < deadline) {
+      if (["failed", "stopped", "waiting-user"].includes(current?.state)) {
+        throw new Error(current.error || `后台 Worker 无法处理事件任务（${current.state}）。`);
+      }
+      await sleep(200);
+      current = await haminn.workers.status();
     }
+    if (current?.state !== "running") throw new Error("后台 Worker 启动超时；事件任务控制已保留，可重试。");
+    return current;
+  }
+
+  async function dispatchEventTaskControl(eventTaskId, command, reply = "", { startWorker = true } = {}) {
+    const identity = { eventTaskId, command, reply: String(reply || "").trim().slice(0, 1200) };
+    if (startWorker) {
+      const current = await readWorkerTaskState();
+      const active = current.active?.value;
+      if (current.serviceState === "running" && active?.state === "event-driven" &&
+          active.eventTaskId === eventTaskId) {
+        // Fence an idle EDT before accepting its control so an already queued notification cannot start another OST.
+        await stopWorkerAndWait();
+      }
+    }
+    const eventId = await prepareDispatchEventId("event-task.control", identity);
+    const dispatched = await submissionCall(() => haminn.workers.dispatch({ event: {
+      type: "event-task.control", ...identity, eventId,
+    } }), 5000, "事件任务控制投递超时；可重新点击同一控制按钮。", "WORKER_EVENT_CONTROL_TIMEOUT");
+    if (!dispatched?.accepted) throw new Error(`后台 Worker 未接收事件任务控制（${dispatched?.state || "未知状态"}）。`);
+    await clearDispatchEventId("event-task.control", eventId);
+    if (!startWorker) return { eventId, queued: true };
+    await ensureWorkerRunningForControl();
+    const expected = command === "pause" ? new Set(["paused"])
+      : command === "cancel" ? new Set(["cancelled"])
+        : new Set(["active", "needs-user", "needs-app-authorization", "needs-system-access"]);
+    const deadline = Date.now() + 6000;
+    let latest = null;
+    while (Date.now() < deadline) {
+      latest = await haminn.data.get({ collection: "event-tasks", key: `ed:${eventTaskId}` });
+      const task = latest?.value;
+      if (task?.lastControlEventId === eventId && (expected.has(task.state) || task.lastControlError)) break;
+      await sleep(200);
+    }
+    return latest?.value || null;
+  }
+
+  async function authorizeEventTask(task) {
+    let authorization = await haminn.permissions.status({ capability: "notifications.listen" });
+    if (authorization?.grant !== "allow") {
+      await haminn.permissions.request({ capability: "notifications.listen" });
+      authorization = await haminn.permissions.status({ capability: "notifications.listen" });
+    }
+    if (authorization?.grant !== "allow") throw new Error("ImHamster 的通知读取能力尚未获准。");
+    const status = await haminn.notifications.getStatus();
+    if (!status?.listenerAccess) {
+      await haminn.notifications.openListenerSettings();
+      setMessage("已打开 Android 通知使用权设置；启用 Haminn 后返回 ImHamster，再点“授权并继续”。", "wait");
+      return null;
+    }
+    return dispatchEventTaskControl(task.eventTaskId, "resume");
+  }
+
+  async function handleEventTaskControl(button) {
+    if (workerControlBusy || !window.haminn?.isReady) return;
+    const eventTaskId = String(button.dataset.eventTaskId || "");
+    const command = String(button.dataset.eventTaskCommand || "");
+    const card = button.closest(".worker-event-task");
+    const reply = card?.querySelector("[data-event-task-reply]")?.value || "";
+    if (!eventTaskId || !["pause", "resume", "cancel", "authorize"].includes(command)) return;
+    workerControlBusy = true;
+    try {
+      const task = command === "authorize" ? await authorizeEventTask({ eventTaskId })
+        : await dispatchEventTaskControl(eventTaskId, command, reply);
+      if (!task && command === "authorize") return;
+      const summary = task?.lastControlError ? `事件任务控制未完成：${task.lastControlError}，可重试。`
+        : task?.state === "paused" ? "事件任务已暂停。"
+          : task?.state === "cancelled" ? "事件任务已取消。"
+            : task?.state === "needs-system-access" ? "请在 Android 通知使用权设置中允许 Haminn 后继续。"
+              : task?.state === "needs-app-authorization" ? "ImHamster 仍缺少通知读取能力；请重试授权。"
+                : task ? `事件任务状态：${eventTaskStateLabel(task.state)}。` : "控制指令已交给后台 Worker；状态正在同步。";
+      setMessage(summary, task?.lastControlError ? "error" : "success");
+    } catch (error) {
+      setMessage(error.message || "事件任务控制失败，可重试。", "error");
+    } finally {
+      workerControlBusy = false;
+      await refreshWorkerPanel();
+    }
+  }
+
+  async function applyHoUserControl(command, reply = "") {
+    hoControlModule ||= import("./agent/ho/control.mjs");
+    const { applyUserControl } = await hoControlModule;
+    return applyUserControl(haminn.data, { command, reply });
   }
 
   async function controlWorker(actionName) {
@@ -874,15 +1121,40 @@
     try {
       if (actionName === "pause") {
         await stopWorkerAndWait();
-        const saved = await saveWorkerControlState("paused", "paused");
-        const summary = saved ? "后台任务已暂停，进度已保存。" : "后台 Worker 已停止；没有活动任务需要暂停。";
-        if (saved) await saveLastResult({ status: "paused", summary, finishedAt: Date.now() });
+        const control = await applyHoUserControl("pause");
+        const summary = control.updated ? "后台任务已暂停，进度已保存。" : "后台 Worker 已停止；没有活动任务需要暂停。";
+        if (control.updated) await saveLastResult({ status: "paused", summary, finishedAt: Date.now() });
         setMessage(summary, "success");
       } else if (actionName === "cancel") {
+        const current = await readWorkerTaskState();
+        const liveEventTasks = current.eventTasks.map(item => item?.value).filter(item => item && item.state !== "cancelled");
         await stopWorkerAndWait();
-        const saved = await saveWorkerControlState("cancelled", "cancelled");
-        await clearQueuedGoals();
-        const summary = saved ? "所有后台任务已取消。" : "后台 Worker 已停止，排队任务已清除。";
+        const control = await applyHoUserControl("cancel");
+        for (const task of liveEventTasks) {
+          await dispatchEventTaskControl(task.eventTaskId, "cancel", "", { startWorker: false });
+        }
+        if (liveEventTasks.length) {
+          await ensureWorkerRunningForControl();
+          const deadline = Date.now() + 10_000;
+          while (Date.now() < deadline) {
+            const remaining = await Promise.all(liveEventTasks.map(async task => {
+              const latest = await haminn.data.get({ collection: "event-tasks", key: `ed:${task.eventTaskId}` });
+              return latest?.value?.state !== "cancelled";
+            }));
+            if (!remaining.some(Boolean)) break;
+            await sleep(250);
+          }
+          const stillLive = [];
+          for (const task of liveEventTasks) {
+            const latest = await haminn.data.get({ collection: "event-tasks", key: `ed:${task.eventTaskId}` });
+            if (latest?.value?.state !== "cancelled") stillLive.push(task.eventTaskId);
+          }
+          if (stillLive.length) throw new Error(`部分事件任务尚未确认取消（${stillLive.length} 项）；后台控制已排队，可重试。`);
+          await stopWorkerAndWait();
+        }
+        const summary = control.updated || control.queuedCancelled
+          || liveEventTasks.length ? `已取消当前后台任务、${liveEventTasks.length} 项事件任务，并清除 ${control.queuedCancelled} 项排队任务。`
+          : "后台 Worker 已停止；没有活动或排队任务需要取消。";
         await saveLastResult({ status: "cancelled", summary, finishedAt: Date.now() });
         setMessage(summary, "success");
       } else if (actionName === "resume") {
@@ -892,7 +1164,7 @@
         }
         const reply = String(workerReplyInput?.value || "").trim().slice(0, 1200);
         const shouldDispatchResume = ["waiting", "paused", "failed"].includes(active.value.state);
-        if (["paused", "waiting", "failed"].includes(active.value.state)) await saveWorkerControlState("active", "ready", reply);
+        const control = shouldDispatchResume ? await applyHoUserControl("resume", reply) : null;
         let started = await haminn.workers.status();
         const wasAlreadyRunning = started?.state === "running";
         if (!wasAlreadyRunning) started = await haminn.workers.start();
@@ -906,13 +1178,16 @@
         }
         if (current?.state !== "running") throw new Error("后台 Worker 启动超时；任务仍保存在本机。");
         if (shouldDispatchResume && wasAlreadyRunning) {
-          const resumed = await taskCall(() => haminn.workers.dispatch({ event: { type: "goal.resume", reply } }),
+          const eventId = await prepareDispatchEventId("goal.resume", { goalId: active.value.goalId, reply });
+          const resumed = await submissionCall(() => haminn.workers.dispatch({ event: { type: "goal.resume", reply, eventId } }),
             5000, "任务恢复指令投递超时；进度仍保存在本机。", "WORKER_RESUME_TIMEOUT");
           if (!resumed?.accepted) throw new Error(`后台 Worker 未接受恢复指令（${resumed?.state || "未知状态"}）。`);
+          await clearDispatchEventId("goal.resume", eventId);
         }
+        const resumedIntent = control?.intent || active.value.intent;
         const summary = "后台任务已继续；正在重新观察屏幕并恢复进度。";
         if (workerReplyInput) workerReplyInput.value = "";
-        await saveLastResult({ status: "running", summary, goalIntent: active.value.intent, acceptedAt: Date.now() });
+        await saveLastResult({ status: "running", summary, goalIntent: resumedIntent, acceptedAt: Date.now() });
         setMessage(summary, "success");
       }
     } catch (error) {
@@ -958,17 +1233,17 @@
         }
         instruction = normalizeInstruction(prompt.text);
       }
-        taskDeadlineAt = Date.now() + TASK_TIMEOUT_MS;
+        submissionDeadlineAt = Date.now() + SUBMISSION_TIMEOUT_MS;
         await beginTrace("screen-task", instruction);
-      status = await taskCall(() => haminn.interaction.status(), 5000, "屏幕交互状态检查超时。", "BRIDGE_TIMEOUT");
+      status = await submissionCall(() => haminn.interaction.status(), 5000, "屏幕交互状态检查超时。", "BRIDGE_TIMEOUT");
       if (!status.accessibilityEnabled || status.authorization?.grant !== 'allow' || !status.serviceConnected) {
         throw new Error('Haminn 屏幕交互服务或本 happ 授权不可用；没有操作屏幕。');
       }
 
       setMessage(`先从设备测试 ${provider.displayName || provider.model}；成功后才开始截图和触摸。`, 'wait');
-      await taskCall(() => haminn.permissions.request({ capability: 'network', scope: providerScope() }),
+      await submissionCall(() => haminn.permissions.request({ capability: 'network', scope: providerScope() }),
         12_000, "模型网络授权请求超时。", "BRIDGE_TIMEOUT");
-      const currentNetwork = await taskCall(() => haminn.permissions.status({ capability: 'network', scope: providerScope() }),
+      const currentNetwork = await submissionCall(() => haminn.permissions.status({ capability: 'network', scope: providerScope() }),
         5000, "模型网络授权状态查询超时。", "BRIDGE_TIMEOUT");
       networkGrant = currentNetwork.grant || 'unknown';
       if (networkGrant !== 'allow') throw new Error('模型服务网络权限尚未授予；没有操作屏幕。');
@@ -980,8 +1255,7 @@
 
       await setBubbleState('托管', '#c18122');
       setMessage('正在启动 Haminn 后台 Worker；任务接管后即使离开此页面也会继续。', 'wait');
-      const workerStart = await taskCall(() => haminn.workers.start(), 12_000,
-        '后台 Worker 启动请求超时。', 'WORKER_START_TIMEOUT');
+      const workerStart = await startWorkerForGoalSubmission();
       if (workerStart.state === 'waiting-user') throw new Error('后台运行授权尚未授予；任务未提交。');
       let workerStatus = workerStart;
       const workerReadyDeadline = Date.now() + 20_000;
@@ -990,13 +1264,15 @@
           throw new Error(workerStatus.error || `后台 Worker 未能启动（${workerStatus.state}）。`);
         }
         await sleep(250);
-        workerStatus = await taskCall(() => haminn.workers.status(), 5000,
+        workerStatus = await submissionCall(() => haminn.workers.status(), 5000,
           '后台 Worker 状态查询超时。', 'WORKER_STATUS_TIMEOUT');
       }
       if (workerStatus.state !== 'running') throw new Error('后台 Worker 启动超过等待时限；任务未提交。');
-      const dispatched = await taskCall(() => haminn.workers.dispatch({ event: { type: 'goal.submit', intent: instruction } }),
+      const eventId = await prepareDispatchEventId("goal.submit", { intent: instruction });
+      const dispatched = await submissionCall(() => haminn.workers.dispatch({ event: { type: 'goal.submit', intent: instruction, eventId } }),
         5000, '后台任务投递超时。', 'WORKER_DISPATCH_TIMEOUT');
       if (!dispatched.accepted) throw new Error(`后台 Worker 未接收任务（${dispatched.state}）。`);
+      await clearDispatchEventId("goal.submit", eventId);
       backgroundHandedOff = true;
       await finishTrace("handed-off");
       const result = { status: 'running', summary: '任务已交给 Haminn 后台 Worker。你可以离开页面；暂停、继续或取消可在 ImHamster 任务卡片中操作。',
@@ -1013,7 +1289,7 @@
       setMessage(summary, 'error');
       await setBubbleState('!', '#c94d53');
     } finally {
-      taskDeadlineAt = 0;
+      submissionDeadlineAt = 0;
       operationRunning = false;
       updateControls();
     }
@@ -1021,34 +1297,41 @@
 
   function sleep(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
 
-  function remainingTaskMs() {
-    return taskDeadlineAt > 0 ? Math.max(0, taskDeadlineAt - Date.now()) : Number.POSITIVE_INFINITY;
+  function remainingSubmissionMs() {
+    return submissionDeadlineAt > 0 ? Math.max(0, submissionDeadlineAt - Date.now()) : Number.POSITIVE_INFINITY;
   }
 
-  function assertTaskTime() {
-    if (taskDeadlineAt <= 0 || Date.now() < taskDeadlineAt) return;
-    const error = new Error(TASK_TIMEOUT_MESSAGE);
-    error.code = "TASK_TIMEOUT";
+  function assertSubmissionTime() {
+    if (submissionDeadlineAt <= 0 || Date.now() < submissionDeadlineAt) return;
+    const error = new Error(SUBMISSION_TIMEOUT_MESSAGE);
+    error.code = "SUBMISSION_TIMEOUT";
     throw error;
   }
 
-  function taskCall(invoke, maxMs, messageText, code) {
-    const remaining = remainingTaskMs();
+  function submissionCall(invoke, maxMs, messageText, code) {
+    const remaining = remainingSubmissionMs();
     if (remaining <= 0) {
-      const error = new Error(TASK_TIMEOUT_MESSAGE);
-      error.code = "TASK_TIMEOUT";
+      const error = new Error(SUBMISSION_TIMEOUT_MESSAGE);
+      error.code = "SUBMISSION_TIMEOUT";
       return Promise.reject(error);
     }
     const deadlineLimited = remaining <= maxMs;
     const promise = typeof invoke === "function" ? invoke() : invoke;
-    return withTimeout(promise, Math.min(maxMs, remaining), deadlineLimited ? TASK_TIMEOUT_MESSAGE : messageText,
-      deadlineLimited ? "TASK_TIMEOUT" : code);
+    return withTimeout(promise, Math.min(maxMs, remaining), deadlineLimited ? SUBMISSION_TIMEOUT_MESSAGE : messageText,
+      deadlineLimited ? "SUBMISSION_TIMEOUT" : code);
   }
 
   setupButton.addEventListener("click", continueSetup);
+  workerJournalDetails?.addEventListener("toggle", () => {
+    if (workerJournalDetails.open) void loadWorkerJournal();
+  });
   workerPauseButton?.addEventListener("click", () => controlWorker("pause"));
   workerResumeButton?.addEventListener("click", () => controlWorker("resume"));
   workerCancelButton?.addEventListener("click", () => controlWorker("cancel"));
+  workerEventTasks?.addEventListener("click", (event) => {
+    const button = event.target?.closest?.("button[data-event-task-command]");
+    if (button && workerEventTasks.contains(button)) void handleEventTaskControl(button);
+  });
   consent.addEventListener("change", async () => {
     updateControls();
     if (!window.haminn?.isReady) return;
@@ -1107,9 +1390,11 @@
         $("#last-result").textContent = previous.value.traceSummary
           ? `${previous.value.summary} · ${previous.value.traceSummary}` : previous.value.summary;
       }
+      const hasBackgroundWorkerResult = Boolean(previous?.value?.goalIntent);
       const oldTrace = await haminn.data.get({ collection: "screen-interaction", key: "run-trace" }).catch(() => null);
       const traceLine = $("#run-trace");
-      if (traceLine && oldTrace?.value?.kind === "screen-task" && Array.isArray(oldTrace.value.events) && oldTrace.value.events.length) {
+      if (hasBackgroundWorkerResult && traceLine) traceLine.hidden = true;
+      if (traceLine && !hasBackgroundWorkerResult && oldTrace?.value?.kind === "screen-task" && Array.isArray(oldTrace.value.events) && oldTrace.value.events.length) {
         traceLine.hidden = false;
         const trace = oldTrace.value;
         const summary = traceSummary(trace);
@@ -1132,7 +1417,7 @@
       updateControls();
       await refreshWorkerPanel();
       await refreshStatus();
-      if (traceLine && oldTrace?.value?.kind === "screen-task" && Array.isArray(oldTrace.value.events) && oldTrace.value.events.length) {
+      if (traceLine && !hasBackgroundWorkerResult && oldTrace?.value?.kind === "screen-task" && Array.isArray(oldTrace.value.events) && oldTrace.value.events.length) {
         const trace = oldTrace.value;
         const lastEvent = trace.events[trace.events.length - 1];
         if (trace.status === "completed") {
