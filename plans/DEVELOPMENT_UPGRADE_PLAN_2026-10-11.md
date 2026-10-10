@@ -422,7 +422,7 @@ JS 测试适合纯状态与组装；QuickJS/Android 仪器测试负责真实模�
 - Worker 启动恢复在宿主发出 `worker.queue-drained` 前不扫描旧本地通知；控制完成后先更新 EDT 持久状态，再处理剩余通知。新增回归用例覆盖启动时取消加旧通知入箱，证明取消后事件只记为 ignored，不启动模型、截图或新 OST。Haminn Android instrumentation 还覆盖普通队列满时仍能接受最多 128 条控制，并保持按优先级先出队。
 - 进一步检查发现当前待命 EDT 的控制若只排入队列，Worker 可能先从长等待恢复再处理。ImHamster 现在只在当前活动目标确为该待命 EDT 时先停止空闲 Worker；Haminn QuickJS 先初始化模块，再于第一次 `start` 恢复既有 OST 前处理高优先级持久控制。已触发的 OST 维持独立生命周期，不因单独关闭 EDT 而被意外改写。增加 WorkerRuntime 预启动投递和 Host 启动顺序 instrumentation 用例。
 - ImHamster 全量 Node 测试为 53/53 通过；`node --check app.js` 与 `git diff --check` 通过。Haminn `:app:compileDebugKotlin`、`:app:testDebugUnitTest` 与 `:app:compileDebugAndroidTestKotlin` 通过；instrumentation 尚未在真机运行。Haminn 合同测试仍为 32/35，失败是既有的开发页文案、旧安装调用和录屏额度断言，本轮队列合同断言通过。
-- DEV watcher 在后续本地更新前最后观察到 revision 927，连续刷新均失败并报告页面不可见；随后停止 watcher 以避免在没有前台页面时反复发布。revision 927 未包含后续 UI 控制顺序修订，也不能视为手机实际运行证据。EDT 通知/暂停/恢复/取消真机验收、持续定时 EDT、进程中断时的优先控制恢复以及 CAE/SM/ME/TE 完整学习闭环仍未验收。
+- ImHamster 检查点 `9c8df03` 已推送至 `origin/main`。随后 `prepare-dir --no-claim` 将当前完整本地工作树同步到 DEV revision 928（tree hash `f4ff9648…`）；服务状态确认 DEV 快照已更新，但 `runtime=not-visible`、无前台认领和渲染回执，因此不能视为手机已运行。持续 watcher 已停止，避免页面不可见时反复发布。Haminn debug APK 与 Android test APK 已构建，尚未安装/运行 instrumentation。EDT 通知/暂停/恢复/取消真机验收、持续定时 EDT、进程中断时的优先控制恢复以及 CAE/SM/ME/TE 完整学习闭环仍未验收。
 
 ## 11. 交付与完成判定
 
