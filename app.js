@@ -24,6 +24,7 @@
   let provider = null;
   let networkGrant = "unknown";
   let operationRunning = false;
+  let backgroundHandedOff = false;
   let modelConnectionVerified = false;
   let modelTestFailed = false;
   let lastResult = null;
@@ -300,6 +301,7 @@
       return;
     }
     operationRunning = true;
+    backgroundHandedOff = false;
     let modelTestStarted = false;
     updateControls();
     try {
@@ -1413,14 +1415,32 @@
         await testModelConnection();
       }
 
-      await setBubbleState('…', '#c18122');
-      setMessage('模型已连接；开始截图识别屏幕并逐步执行。', 'wait');
-      const result = await executeInstruction(instruction);
-      await finishTrace("completed");
-      result.traceSummary = activeTrace.summary;
+      await setBubbleState('托管', '#c18122');
+      setMessage('正在启动 Haminn 后台 Worker；任务接管后即使离开此页面也会继续。', 'wait');
+      const workerStart = await taskCall(() => haminn.workers.start(), 12_000,
+        '后台 Worker 启动请求超时。', 'WORKER_START_TIMEOUT');
+      if (workerStart.state === 'waiting-user') throw new Error('后台运行授权尚未授予；任务未提交。');
+      let workerStatus = workerStart;
+      const workerReadyDeadline = Date.now() + 20_000;
+      while (workerStatus.state !== 'running' && Date.now() < workerReadyDeadline) {
+        if (workerStatus.state === 'failed' || workerStatus.state === 'stopped') {
+          throw new Error(workerStatus.error || `后台 Worker 未能启动（${workerStatus.state}）。`);
+        }
+        await sleep(250);
+        workerStatus = await taskCall(() => haminn.workers.status(), 5000,
+          '后台 Worker 状态查询超时。', 'WORKER_STATUS_TIMEOUT');
+      }
+      if (workerStatus.state !== 'running') throw new Error('后台 Worker 启动超过等待时限；任务未提交。');
+      const dispatched = await taskCall(() => haminn.workers.dispatch({ event: { type: 'goal.submit', intent: instruction } }),
+        5000, '后台任务投递超时。', 'WORKER_DISPATCH_TIMEOUT');
+      if (!dispatched.accepted) throw new Error(`后台 Worker 未接收任务（${dispatched.state}）。`);
+      backgroundHandedOff = true;
+      await finishTrace("handed-off");
+      const result = { status: 'running', summary: '任务已交给 Haminn 后台 Worker。你可以离开页面；暂停或取消可在 Haminn 后台助手通知中操作。',
+        goalIntent: instruction, workerState: workerStatus.state, acceptedAt: Date.now() };
       await saveLastResult(result);
       setMessage(result.summary, 'success');
-      await setBubbleState('✓', '#20966c');
+      await setBubbleState('运行', '#20966c');
     } catch (error) {
       const summary = error.message || '模型或视觉操作失败；没有执行确认的后续动作。';
       await finishTrace("failed", error);
@@ -1483,7 +1503,7 @@
   window.haminn?.on("overlay.clicked", runFromOverlay);
 
   window.addEventListener("pagehide", () => {
-    if (!operationRunning) return;
+    if (!operationRunning || backgroundHandedOff) return;
     const stepCount = activeTrace?.events.filter((event) => event.phase === "step-start").length || 0;
     if (activeTrace) {
       activeTrace.finishedAt = Date.now();

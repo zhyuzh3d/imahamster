@@ -4,5 +4,6 @@
   "name": "ImHamster 屏幕交互",
   "entry": "index.html",
   "routing": "hash",
-  "version": { "code": 24, "name": "0.1.23" }
+  "background": { "entry": "agent/worker.mjs" },
+  "version": { "code": 25, "name": "0.1.24" }
 }
