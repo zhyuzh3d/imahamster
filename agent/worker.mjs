@@ -89,11 +89,12 @@ function providerRequest(frame) {
   const endpoint = `${provider.baseUrl.replace(/\/+$/, "")}${provider.endpointPath || "/v1/chat/completions"}`;
   const operation = state.pendingOperationId ? state.pendingOperation : null;
   const operationContext = operation ? `\n待核实操作记录：${JSON.stringify({
+    operationId: operation.operationId || state.pendingOperationId,
     status: operation.status || "unknown",
     kind: operation.kind || "",
     target: String(operation.target || "").slice(0, 160),
     label: String(operation.label || "").slice(0, 80),
-    intendedContent: String(operation.intendedContent || "").slice(0, 1200),
+    intendedContent: String(operation.intendedContent || "").slice(0, 8192),
     bridgeAccepted: operation.result?.accepted === true,
   })}。Bridge accepted 只表示收到派发请求，不等于界面效果已发生；必须结合当前截图核实。` : "";
   const messages = [

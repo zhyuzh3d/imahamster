@@ -216,13 +216,14 @@ test("missing model confidence cannot dispatch a screen action", () => {
 
 test("recovery gives the model pending operation details and does not replay an unknown effect", () => {
   const records = new Map();
+  const intendedContent = "synthetic recovery text ".repeat(70);
   const active = {
     goalId: "goal-recovery", taskId: "task-recovery", runId: "run-recovery",
     intent: "核实合成消息操作，不要重复发送", state: "active", step: 3, revision: 4,
     progress: "消息操作回执待核实", pendingOperationId: "operation-recovery",
     pendingOperation: {
       operationId: "operation-recovery", status: "returned", kind: "send", target: "Synthetic contact",
-      label: "Send", intendedContent: "Synthetic hello", result: { accepted: true },
+      label: "Send", intendedContent, result: { accepted: true },
     },
   };
   records.set("agent-runtime:active-goal", { value: active, revision: "1" });
@@ -262,7 +263,7 @@ test("recovery gives the model pending operation details and does not replay an 
   assert.equal(result.state, "waiting");
   assert.match(prompt, /"status":"returned"/);
   assert.match(prompt, /Synthetic contact/);
-  assert.match(prompt, /Synthetic hello/);
+  assert.ok(prompt.includes(intendedContent), "recovery context must preserve the full allowed draft length");
   assert.match(prompt, /Bridge accepted 只表示收到派发请求/);
   assert.equal(taps, 0);
   assert.equal(records.get("operations:o:operation-recovery").value.status, "unknown");
