@@ -421,6 +421,8 @@ JS 测试适合纯状态与组装；QuickJS/Android 仪器测试负责真实模�
 - 前一版持久事件队列对通知和控制共用 128 条/8 MiB 上限：通知积压达到上限时，暂停/取消也可能被拒绝。Haminn 现将控制事件放入独立有界配额（最多 128 条、256 KiB），普通事件仍为最多 128 条、8 MiB；控制先于普通通知出队。SQLite 版本 19 的 `priority` 列支持该顺序，不改变外部 Bridge 合同。
 - Worker 启动恢复在宿主发出 `worker.queue-drained` 前不扫描旧本地通知；控制完成后先更新 EDT 持久状态，再处理剩余通知。新增回归用例覆盖启动时取消加旧通知入箱，证明取消后事件只记为 ignored，不启动模型、截图或新 OST。Haminn Android instrumentation 还覆盖普通队列满时仍能接受最多 128 条控制，并保持按优先级先出队。
 - 进一步检查发现当前待命 EDT 的控制若只排入队列，Worker 可能先从长等待恢复再处理。ImHamster 现在只在当前活动目标确为该待命 EDT 时先停止空闲 Worker；Haminn QuickJS 先初始化模块，再于第一次 `start` 恢复既有 OST 前处理高优先级持久控制。已触发的 OST 维持独立生命周期，不因单独关闭 EDT 而被意外改写。增加 WorkerRuntime 预启动投递和 Host 启动顺序 instrumentation 用例。
+- 压力边界检查又发现，32 槽 Ephemeral channel 满时 `worker.queue-drained` 可能投递失败，旧 inbox 因而一直留存。Host 现在在后续非 barrier 信号处理后重新检查并尝试发出 barrier；对 barrier 本身仍不重复发信号。新增用 128 条控制填满 channel 的启动顺序 instrumentation，要求控制先于 `start`，且 drain barrier 最终到达 Worker。
+- Haminn Android instrumentation 新增微信通知路由用例：仅精确订阅 `com.tencent.mm` 的实例接收事件，同一 `StatusBarNotification` 重投保持相同 eventId 并去重，发送给 Worker 的通知不包含原生 notification key。该用例和新增队列压力用例均已编译，尚未真机运行。
 - ImHamster 全量 Node 测试为 53/53 通过；`node --check app.js` 与 `git diff --check` 通过。Haminn `:app:compileDebugKotlin`、`:app:testDebugUnitTest` 与 `:app:compileDebugAndroidTestKotlin` 通过；instrumentation 尚未在真机运行。Haminn 合同测试仍为 32/35，失败是既有的开发页文案、旧安装调用和录屏额度断言，本轮队列合同断言通过。
 - ImHamster 检查点 `9c8df03` 已推送至 `origin/main`。随后 `prepare-dir --no-claim` 将当前完整本地工作树同步到 DEV revision 928（tree hash `f4ff9648…`）；服务状态确认 DEV 快照已更新，但 `runtime=not-visible`、无前台认领和渲染回执，因此不能视为手机已运行。持续 watcher 已停止，避免页面不可见时反复发布。Haminn debug APK 与 Android test APK 已构建，尚未安装/运行 instrumentation。EDT 通知/暂停/恢复/取消真机验收、持续定时 EDT、进程中断时的优先控制恢复以及 CAE/SM/ME/TE 完整学习闭环仍未验收。
 
