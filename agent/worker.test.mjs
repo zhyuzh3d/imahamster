@@ -6,9 +6,9 @@ function modelCall(params, decide, options = {}) {
   const body = JSON.parse(params.bodyText);
   const text = body.messages?.map(message => typeof message.content === "string" ? message.content : message.content?.map?.(part => part.text || "").join(" ")).join("\n") || "";
   let content;
-  if (text.includes("在本 loop 开始任何屏幕动作前")) content = { estimatedMinutes: 15, budgetMinutes: 15, strategy: "先观察再按证据执行" };
+  if (text.includes("在本 AL 开始任何屏幕动作前")) content = { estimatedMinutes: 15, budgetMinutes: 15, strategy: "先观察再按证据执行" };
   else if (text.includes("判断是否值得保存经验")) content = options.learning || { saveExperience: false, saveTool: false };
-  else if (text.includes("本 loop 已到预算检查点")) content = options.review || { choice: "continue", additionalMinutes: 5, reason: "还存在直接可行路径", nextStrategy: "复核现场并继续" };
+  else if (text.includes("本 AL 已到预算检查点")) content = options.review || { choice: "continue", additionalMinutes: 5, reason: "还存在直接可行路径", nextStrategy: "复核现场并继续" };
   else content = decide();
   return { status: 200, bodyText: JSON.stringify({ choices: [{ message: { content: JSON.stringify(content) } }] }) };
 }
@@ -300,7 +300,7 @@ test("recovery gives the model pending operation details and does not replay an 
       const body = JSON.parse(params.bodyText);
       const userContent = body.messages[1].content;
       const text = Array.isArray(userContent) ? userContent[0]?.text || "" : String(userContent || "");
-      if (!text.includes("在本 loop 开始任何屏幕动作前") && !text.includes("判断是否值得保存经验")) prompt = text;
+      if (!text.includes("在本 AL 开始任何屏幕动作前") && !text.includes("判断是否值得保存经验")) prompt = text;
       return modelCall(params, () => ({ state: "wait", operationResult: "unknown", evidence: "截图无法确认合成消息是否已经发送", waitMs: 1000 }));
     }
     if (method === "worker.wait") return { waitedMs: params.ms };
@@ -402,12 +402,12 @@ test("an already-running Worker accepts an explicit resume event for a paused Go
   assert.equal(captures, 1, "resume must reobserve before any external action");
 });
 
-test("loop timeout invokes LLM review and can extend the current loop instead of failing the task", () => {
+test("action loop timeout invokes LLM review and can extend the current action loop instead of failing the task", () => {
   const records = new Map();
   const now = Date.now();
   const active = { goalId: "goal-budget", taskId: "task-budget", runId: "run-budget",
     intent: "完成合成任务", state: "running", step: 9000, revision: 9, progress: "仍在确认合成结果",
-    loop: { index: 2, status: "running", budgetMinutes: 15, estimatedMinutes: 15, elapsedMs: 15 * 60_000, segmentStartedAt: null } };
+    actionLoop: { index: 2, status: "running", budgetMinutes: 15, estimatedMinutes: 15, elapsedMs: 15 * 60_000, segmentStartedAt: null } };
   records.set("agent-runtime:active-goal", { value: active, revision: "4" });
   let captures = 0;
   let reviewCalls = 0;
@@ -426,7 +426,7 @@ test("loop timeout invokes LLM review and can extend the current loop instead of
       const body = JSON.parse(params.bodyText);
       const content = body.messages[1].content;
       const prompt = Array.isArray(content) ? content[0]?.text || "" : String(content || "");
-      if (prompt.includes("本 loop 已到预算检查点")) reviewCalls += 1;
+      if (prompt.includes("本 AL 已到预算检查点")) reviewCalls += 1;
       return modelCall(params, () => ({ state: "done", evidence: "LLM 根据最终截图判断合成任务已完成" }));
     }
     throw new Error(`Unexpected tool: ${method}`);
@@ -441,17 +441,17 @@ test("loop timeout invokes LLM review and can extend the current loop instead of
   assert.equal(output.state, "done");
   assert.equal(saved.state, "done");
   assert.equal(reviewCalls, 1);
-  assert.equal(saved.trace.find(event => event.phase === "loop.review")?.choice, "continue");
-  assert.equal(saved.loop.extensionCount, 1);
+  assert.equal(saved.trace.find(event => event.phase === "action-loop.review")?.choice, "continue");
+  assert.equal(saved.actionLoop.extensionCount, 1);
   assert.equal(saved.goalId, active.goalId);
   assert.equal(captures, 2, "timeout review and resumed work both observe the screen");
 });
 
-test("LLM can start a new loop after timeout and choose a reusable experience after success", () => {
+test("LLM can start a new action loop after timeout and choose a reusable experience after success", () => {
   const records = new Map();
-  const active = { goalId: "goal-new-loop", taskId: "task-new-loop", runId: "run-new-loop",
+  const active = { goalId: "goal-new-action-loop", taskId: "task-new-action-loop", runId: "run-new-action-loop",
     intent: "完成合成任务", state: "running", step: 7, revision: 9, progress: "当前路径耗时较长",
-    loop: { index: 2, status: "running", budgetMinutes: 15, estimatedMinutes: 15, elapsedMs: 15 * 60_000, segmentStartedAt: null }, trace: [] };
+    actionLoop: { index: 2, status: "running", budgetMinutes: 15, estimatedMinutes: 15, elapsedMs: 15 * 60_000, segmentStartedAt: null }, trace: [] };
   records.set("agent-runtime:active-goal", { value: active, revision: "4" });
   const provider = { baseUrl: "https://model.example", apiKey: "x".repeat(24), model: "vision-model" };
 
@@ -465,7 +465,7 @@ test("LLM can start a new loop after timeout and choose a reusable experience af
     }
     if (method === "interaction.capture") return { mime: "image/jpeg", dataBase64: "synthetic-frame" };
     if (method === "network.request") return modelCall(params, () => ({ state: "done", evidence: "LLM 根据最终画面判断任务已完成" }), {
-      review: { choice: "new-loop", reason: "已有进展但当前路径低效", nextStrategy: "重新评估页面入口后继续" },
+      review: { choice: "new-action-loop", reason: "已有进展但当前路径低效", nextStrategy: "重新评估页面入口后继续" },
       learning: {
         saveExperience: true,
         experience: { title: "合成页面直接入口", situation: "合成测试页操作", approach: "先观察当前页面，再使用可见入口", successEvidence: "最终页面显示完成状态", toolRefs: ["interaction.capture", "interaction.tap"] },
@@ -483,8 +483,8 @@ test("LLM can start a new loop after timeout and choose a reusable experience af
   }
   const saved = records.get("agent-runtime:active-goal").value;
   assert.equal(output.state, "done");
-  assert.equal(saved.loop.index, 3);
-  assert.equal(saved.trace.find(event => event.phase === "loop.review")?.choice, "new-loop");
+  assert.equal(saved.actionLoop.index, 3);
+  assert.equal(saved.trace.find(event => event.phase === "action-loop.review")?.choice, "new-action-loop");
   assert.equal(records.get(`knowledge:experience:${active.goalId}`).value.type, "experience");
   assert.deepEqual(records.get(`knowledge:tool-candidate:${active.goalId}`).value.toolRefs, ["interaction.tap"]);
 });
@@ -494,7 +494,7 @@ test("the 30-minute single-goal deadline is a hard orchestration stop and is rep
   const active = { goalId: "goal-deadline", taskId: "task-deadline", runId: "run-deadline",
     intent: "完成一个合成操作", state: "running", step: 4, revision: 5, progress: "等待本轮结果",
     createdAt: Date.now() - 31 * 60_000, goalAttemptStartedAt: Date.now() - 31 * 60_000,
-    goalDeadlineAt: Date.now() - 60_000, loop: { index: 1, status: "running", budgetMinutes: 15, elapsedMs: 2 * 60_000 } };
+    goalDeadlineAt: Date.now() - 60_000, actionLoop: { index: 1, status: "running", budgetMinutes: 15, elapsedMs: 2 * 60_000 } };
   records.set("agent-runtime:active-goal", { value: active, revision: "1" });
   let captures = 0;
   let modelCalls = 0;

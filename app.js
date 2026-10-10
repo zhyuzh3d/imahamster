@@ -751,7 +751,8 @@
     workerStateLine.textContent = queuedCount && !active ? `${queuedCount} 项排队` : workerStateLabel(stateValue, serviceState);
     const lines = [];
     if (active?.intent) lines.push(active.intent.slice(0, 180));
-    if (active?.loop) lines.push(`Loop ${active.loop.index || 1}：预估 ${active.loop.estimatedMinutes || "待定"} 分钟 / 预算 ${active.loop.budgetMinutes || 15} 分钟`);
+    const actionLoop = active?.actionLoop || active?.loop;
+    if (actionLoop) lines.push(`AL ${actionLoop.index || 1}：预估 ${actionLoop.estimatedMinutes || "待定"} 分钟 / 预算 ${actionLoop.budgetMinutes || 15} 分钟`);
     if (Number.isFinite(active?.goalDeadlineAt) && !["done", "failed", "cancelled"].includes(active.state)) {
       lines.push(`单次目标剩余 ${Math.max(0, Math.ceil((active.goalDeadlineAt - Date.now()) / 60_000))} 分钟（上限 30 分钟）`);
     }
@@ -762,11 +763,11 @@
     workerProgressLine.textContent = lines.join(" · ") || "尚无后台任务";
     if (workerTraceLine) {
       const labels = {
-        "goal.accepted": "接收目标", "model.ready": "模型就绪", "screenshot.requested": "请求截图",
+      "goal.accepted": "接收 OST", "model.ready": "模型就绪", "screenshot.requested": "请求截图",
         "screenshot.received": "收到截图", "model.requested": "请求模型", "model.responded": "模型返回",
         "decision": "模型决策", "model.error": "模型处理错误", "bridge.dispatched": "派发操作", "bridge.result": "操作回执", "worker.error": "执行错误",
-        "recovery.scheduled": "安排恢复", "loop.repetition": "重复动作", "screen.unchanged": "画面未变",
-        "loop.planning": "规划新 loop", "loop.started": "Loop 开始", "loop.timeout": "Loop 到时复盘", "loop.review": "LLM 复盘决定",
+        "recovery.scheduled": "安排恢复", "action-loop.repetition": "重复动作", "loop.repetition": "重复动作", "screen.unchanged": "画面未变",
+        "action-loop.planning": "规划 AL", "loop.planning": "规划 AL", "action-loop.started": "AL 开始", "loop.started": "AL 开始", "action-loop.timeout": "AL 预算检查点", "loop.timeout": "AL 预算检查点", "action-loop.review": "LLM 复盘决定", "loop.review": "LLM 复盘决定",
         "goal.time-limit-exceeded": "目标超时停止", "goal.retry-attempt": "重新开始目标", "learning.review-complete": "经验整理完成", "learning.review-skipped": "跳过经验整理",
       };
       const events = Array.isArray(active?.trace) ? active.trace.slice(-8) : [];
@@ -780,7 +781,7 @@
         if (event.phase === "bridge.dispatched" || event.phase === "bridge.result") return `${event.actionType || "操作"}${event.label ? `「${event.label}」` : ""}${event.phase === "bridge.result" ? `，completed=${event.completed} / accepted=${event.accepted}` : ""}`;
         if (event.phase === "worker.error" || event.phase === "model.error") return `${event.stage ? `${event.stage}：` : ""}${event.message || "未知错误"}`;
         if (event.phase === "recovery.scheduled") return `${event.mode === "reobserve" ? "立即重新观察" : "退避后重试"}（第 ${event.attempt} 次）`;
-        if (event.phase === "loop.repetition" || event.phase === "screen.unchanged") return `连续 ${event.count} 次`;
+        if (event.phase === "loop.repetition" || event.phase === "action-loop.repetition" || event.phase === "screen.unchanged") return `连续 ${event.count} 次`;
         if (event.model) return event.model;
         return "";
       };
