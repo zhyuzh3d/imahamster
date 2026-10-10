@@ -12,6 +12,10 @@ ImHamster 是普通 Haminn happ，不需要单例。Haminn 通过一个 Android 
 
 此流程不读取辅助功能控件树，不调用目标 App 的专用 API，不使用 ADB 输入或 shell 自动化。Haminn 只提供系统级截图和操作原语，Happ 自己决定目标与下一步。截图和指令会发送给已配置的 CodeBestie 服务；页面的知情同意会说明这一点。设备操作依赖用户开启 Haminn 无障碍服务与本 happ 的 `screen.interaction` 授权。
 
+## 代理核心开发状态
+
+`agent/model.mjs` 与 `agent/store.mjs` 开始实现设计文档中的 Goal、Task、事件收件箱和外部操作回执，数据写入当前实例的 `haminn.data`，包括依赖就绪、暂停闸门、CAS 和可重复副作用保留。运行 `node --test agent/model.test.mjs` 可执行核心状态单测。这些模块目前还没有连接到页面或后台 Worker；持续运行与自动恢复能力须待 Haminn Worker 宿主合同完成后才能验收。
+
 ## CodeBestie 请求兼容约定
 
 `/v1/chat/completions` 使用普通 JSON 请求。请求体只包含 `model` 和 `messages`；不要传 `stream`、`reasoning_effort`、`max_tokens` 或其他未经 CodeBestie 文档确认并在设备上验证的可选字段。当前只选择 `gpt-6-luna`，不单独发送推理档位；CodeBestie 对该模型的默认推理档位是否为 `low` 尚未验证。
