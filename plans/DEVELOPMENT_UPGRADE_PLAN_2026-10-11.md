@@ -426,6 +426,12 @@ JS 测试适合纯状态与组装；QuickJS/Android 仪器测试负责真实模�
 - ImHamster 全量 Node 测试为 53/53 通过；`node --check app.js` 与 `git diff --check` 通过。Haminn `:app:compileDebugKotlin`、`:app:testDebugUnitTest` 与 `:app:compileDebugAndroidTestKotlin` 通过；instrumentation 尚未在真机运行。Haminn 合同测试仍为 32/35，失败是既有的开发页文案、旧安装调用和录屏额度断言，本轮队列合同断言通过。
 - ImHamster 检查点 `9c8df03` 已推送至 `origin/main`。随后 `prepare-dir --no-claim` 将当前完整本地工作树同步到 DEV revision 928（tree hash `f4ff9648…`）；服务状态确认 DEV 快照已更新，但 `runtime=not-visible`、无前台认领和渲染回执，因此不能视为手机已运行。持续 watcher 已停止，避免页面不可见时反复发布。Haminn debug APK 与 Android test APK 已构建，尚未安装/运行 instrumentation。EDT 通知/暂停/恢复/取消真机验收、持续定时 EDT、进程中断时的优先控制恢复以及 CAE/SM/ME/TE 完整学习闭环仍未验收。
 
+### 10.11 CAE 上下文组装模块化（2026-10-11）
+
+- 将动作提示中的有界上下文组装从 Worker 生命周期模块移至 `agent/cae/context.mjs`。Worker 仍负责状态恢复与输入故障状态推导，再由 CAE 生成模型可见的近期轨迹、AL 历史、待核实操作、经验和可用工具摘要；上下文长度与历史条数保持原边界，未改变提示语义或 HO 对结果的所有权。
+- 新增纯函数测试覆盖时限计算、轨迹与经验裁剪、待核实操作、输入恢复提示、无状态输入和无副作用。全量 `node --test` 为 56/56 通过，`node --check app.js`、`node --check agent/worker.mjs`、`node --check agent/cae/context.mjs` 与 `git diff --check` 通过。
+- 这只是 U3 的 CAE 结构入口，不代表 IC/BP/ME/TE 检索或学习闭环已实现。此次仅修改 ImHamster 本地源码和 README/计划；未升版本、同步 DEV 或部署。用户回复“已经连接”后，重启 ADB 服务仍未枚举设备，当前真机验证继续等待 USB 调试通路恢复。
+
 ## 11. 交付与完成判定
 
 ImHamster 与 Haminn 独立提交、验证和推送；每次提交前核对各自 Git 根与 origin，保留无关工作区改动。宿主新增合同需同步 SDK/能力文档/实际实现，消费者只接入确实支持的能力。

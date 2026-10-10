@@ -16,7 +16,7 @@ ImHamster 是普通 Haminn happ，不需要单例。Haminn 通过一个 Android 
 
 ## 代理核心开发状态
 
-`agent/model.mjs` 与 `agent/store.mjs` 定义兼容用的 Goal/Task 数据记录、事件收件箱和外部操作回执；产品术语见[术语表](docs/术语表.md)。`agent/worker.mjs` 是 `haminn.json` 声明的本地后台入口，负责 OST 排队、AL 调度、单步屏幕动作和进展恢复。屏幕动作采用“先持久化 prepared 回执，再派发，后截图核实”的顺序；未知结果会保留未决回执并阻止盲目重放。运行 `node --test agent/model.test.mjs agent/worker.test.mjs` 执行状态与 Worker 编排单测。Haminn HostService 生命周期及合成页面截图、模型判断和按钮操作已有 CMA-AN00 真机证据；真实目标应用、暂停/继续/取消控件真机验收、断电恢复和长时间压力仍需设备验收。
+`agent/model.mjs` 与 `agent/store.mjs` 定义兼容用的 Goal/Task 数据记录、事件收件箱和外部操作回执；产品术语见[术语表](docs/术语表.md)。`agent/worker.mjs` 是 `haminn.json` 声明的本地后台入口，负责 OST 排队、AL 调度、单步屏幕动作和进展恢复；`agent/cae/context.mjs` 独立组装有界的动作上下文，后续由 CAE 接入 IC、BP、Memory 与工具检索。屏幕动作采用“先持久化 prepared 回执，再派发，后截图核实”的顺序；未知结果会保留未决回执并阻止盲目重放。运行 `node --test` 执行状态、Worker 与 CAE 单测。Haminn HostService 生命周期及合成页面截图、模型判断和按钮操作已有 CMA-AN00 真机证据；真实目标应用、暂停/继续/取消控件真机验收、断电恢复和长时间压力仍需设备验收。
 
 ## CodeBestie 请求兼容约定
 
