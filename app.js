@@ -8,6 +8,8 @@
   const workerPanel = $("#worker-panel");
   const workerStateLine = $("#worker-state");
   const workerProgressLine = $("#worker-progress");
+  const workerTraceLine = $("#worker-trace");
+  const workerReplyInput = $("#worker-reply");
   const workerPauseButton = $("#worker-pause");
   const workerResumeButton = $("#worker-resume");
   const workerCancelButton = $("#worker-cancel");
@@ -731,9 +733,9 @@
 
   function workerStateLabel(value, serviceState) {
     if (value === "paused") return "已暂停";
-    if (value === "waiting") return "等待条件";
+    if (value === "waiting") return "等待处理";
     if (value === "done") return "已完成";
-    if (value === "failed") return "已停止";
+    if (value === "failed") return "执行失败 · 可重试";
     if (value === "cancelled") return "已取消";
     if (value === "active" || value === "running") return serviceState === "running" ? "运行中" : "可继续";
     return value || "待处理";
@@ -742,20 +744,56 @@
   function renderWorkerPanel(activeRecord, queuedCount, serviceState) {
     if (!workerPanel) return;
     const active = activeRecord?.value || null;
-    const visible = !!active && !["done", "failed", "cancelled"].includes(active.state) || queuedCount > 0;
+    const visible = (!!active && !["done", "failed", "cancelled"].includes(active.state)) || queuedCount > 0 || !!active?.trace?.length;
     workerPanel.hidden = !visible;
     if (!visible) return;
     const stateValue = active?.state || "queued";
     workerStateLine.textContent = queuedCount && !active ? `${queuedCount} 项排队` : workerStateLabel(stateValue, serviceState);
     const lines = [];
     if (active?.intent) lines.push(active.intent.slice(0, 180));
+    if (active?.loop) lines.push(`Loop ${active.loop.index || 1}：预估 ${active.loop.estimatedMinutes || "待定"} 分钟 / 预算 ${active.loop.budgetMinutes || 15} 分钟`);
+    if (Number.isFinite(active?.goalDeadlineAt) && !["done", "failed", "cancelled"].includes(active.state)) {
+      lines.push(`单次目标剩余 ${Math.max(0, Math.ceil((active.goalDeadlineAt - Date.now()) / 60_000))} 分钟（上限 30 分钟）`);
+    }
     if (active?.progress) lines.push(active.progress.slice(0, 240));
+    if (active?.waiting?.question) lines.push(`需要你确认：${String(active.waiting.question).slice(0, 180)}`);
+    if (workerReplyInput) workerReplyInput.hidden = !active?.waiting?.question;
     if (queuedCount) lines.push(`${queuedCount} 项等待执行`);
     workerProgressLine.textContent = lines.join(" · ") || "尚无后台任务";
+    if (workerTraceLine) {
+      const labels = {
+        "goal.accepted": "接收目标", "model.ready": "模型就绪", "screenshot.requested": "请求截图",
+        "screenshot.received": "收到截图", "model.requested": "请求模型", "model.responded": "模型返回",
+        "decision": "模型决策", "model.error": "模型处理错误", "bridge.dispatched": "派发操作", "bridge.result": "操作回执", "worker.error": "执行错误",
+        "recovery.scheduled": "安排恢复", "loop.repetition": "重复动作", "screen.unchanged": "画面未变",
+        "loop.planning": "规划新 loop", "loop.started": "Loop 开始", "loop.timeout": "Loop 到时复盘", "loop.review": "LLM 复盘决定",
+        "goal.time-limit-exceeded": "目标超时停止", "goal.retry-attempt": "重新开始目标", "learning.review-complete": "经验整理完成", "learning.review-skipped": "跳过经验整理",
+      };
+      const events = Array.isArray(active?.trace) ? active.trace.slice(-8) : [];
+      const detail = (event) => {
+        if (event.phase === "decision") {
+          const action = event.actionType ? ` ${event.actionType}${event.label ? `「${event.label}」` : ""}${Number.isFinite(event.x) ? ` @${event.x.toFixed(2)},${Number(event.y).toFixed(2)}` : ""}` : "";
+          return `${event.decision || "?"}${action}${event.evidence ? `：${event.evidence}` : ""}`;
+        }
+        if (event.phase === "screenshot.received") return `${event.width || "?"}×${event.height || "?"}，${event.bytes || 0} B`;
+        if (event.phase === "model.responded") return `HTTP ${event.httpStatus ?? "?"}${event.responseBytes ? `，${event.responseBytes} 字符` : ""}`;
+        if (event.phase === "bridge.dispatched" || event.phase === "bridge.result") return `${event.actionType || "操作"}${event.label ? `「${event.label}」` : ""}${event.phase === "bridge.result" ? `，completed=${event.completed} / accepted=${event.accepted}` : ""}`;
+        if (event.phase === "worker.error" || event.phase === "model.error") return `${event.stage ? `${event.stage}：` : ""}${event.message || "未知错误"}`;
+        if (event.phase === "recovery.scheduled") return `${event.mode === "reobserve" ? "立即重新观察" : "退避后重试"}（第 ${event.attempt} 次）`;
+        if (event.phase === "loop.repetition" || event.phase === "screen.unchanged") return `连续 ${event.count} 次`;
+        if (event.model) return event.model;
+        return "";
+      };
+      workerTraceLine.hidden = !events.length;
+      workerTraceLine.textContent = events.map((event) =>
+        `#${event.step || 0} ${labels[event.phase] || event.phase}${detail(event) ? `：${detail(event)}` : ""}`
+      ).join("\n");
+    }
     const busy = workerControlBusy;
-    const activeCanControl = !!active && !["done", "failed", "cancelled"].includes(active.state);
+    const activeCanControl = !!active && !["done", "cancelled"].includes(active.state);
     workerPauseButton.disabled = busy || !activeCanControl || active.state === "paused";
-    workerResumeButton.disabled = busy || !activeCanControl || (active.state !== "paused" && serviceState === "running");
+    workerResumeButton.disabled = busy || !activeCanControl || (active.state !== "paused" && !active?.waiting?.userRequired && active.state !== "failed" && serviceState === "running");
+    workerResumeButton.textContent = active?.state === "failed" || active?.waiting?.userRequired ? "检查后重试" : "继续";
     workerCancelButton.disabled = busy || (!activeCanControl && queuedCount === 0);
   }
 
@@ -788,15 +826,17 @@
     throw new Error("后台 Worker 尚未确认停止；任务状态没有修改。");
   }
 
-  async function saveWorkerControlState(nextState, taskState) {
+  async function saveWorkerControlState(nextState, taskState, reply = "") {
     const active = await haminn.data.get({ collection: "agent-runtime", key: "active-goal" });
     const value = active?.value;
     if (!value?.goalId || !value?.taskId) return false;
     const now = Date.now();
     const progress = nextState === "paused" ? "用户已暂停任务；继续时先重新截图并核对未完成操作。"
-      : nextState === "cancelled" ? "用户已取消任务。" : value.progress;
+      : nextState === "cancelled" ? "用户已取消任务。" : nextState === "active" && value.state !== "active" ? "用户已重试任务；先重新观察屏幕并恢复进度。" : value.progress;
     const operations = [{ op: "put", collection: "agent-runtime", key: "active-goal",
       expectedRevision: active.revision, value: { ...value, state: nextState, progress,
+        intent: reply ? `${value.intent}；用户补充：${reply.slice(0, 1200)}` : value.intent,
+        waiting: nextState === "active" ? null : value.waiting,
         pausedAt: nextState === "paused" ? now : undefined, cancelledAt: nextState === "cancelled" ? now : undefined,
         revision: Number(value.revision || 0) + 1,
         lastProgressAt: now } }];
@@ -846,11 +886,15 @@
         setMessage(summary, "success");
       } else if (actionName === "resume") {
         const active = await haminn.data.get({ collection: "agent-runtime", key: "active-goal" });
-        if (!active?.value || !["active", "running", "waiting", "paused"].includes(active.value.state)) {
+        if (!active?.value || !["active", "running", "waiting", "paused", "failed"].includes(active.value.state)) {
           throw new Error("没有可继续的后台任务。");
         }
-        if (active.value.state === "paused") await saveWorkerControlState("active", "ready");
-        const started = await haminn.workers.start();
+        const reply = String(workerReplyInput?.value || "").trim().slice(0, 1200);
+        const shouldDispatchResume = ["waiting", "paused", "failed"].includes(active.value.state);
+        if (["paused", "waiting", "failed"].includes(active.value.state)) await saveWorkerControlState("active", "ready", reply);
+        let started = await haminn.workers.status();
+        const wasAlreadyRunning = started?.state === "running";
+        if (!wasAlreadyRunning) started = await haminn.workers.start();
         if (started?.state === "waiting-user") throw new Error("后台运行授权尚未授予；任务没有继续。");
         const deadline = Date.now() + 12_000;
         let current = started;
@@ -860,7 +904,13 @@
           current = await haminn.workers.status();
         }
         if (current?.state !== "running") throw new Error("后台 Worker 启动超时；任务仍保存在本机。");
+        if (shouldDispatchResume && wasAlreadyRunning) {
+          const resumed = await taskCall(() => haminn.workers.dispatch({ event: { type: "goal.resume", reply } }),
+            5000, "任务恢复指令投递超时；进度仍保存在本机。", "WORKER_RESUME_TIMEOUT");
+          if (!resumed?.accepted) throw new Error(`后台 Worker 未接受恢复指令（${resumed?.state || "未知状态"}）。`);
+        }
         const summary = "后台任务已继续；正在重新观察屏幕并恢复进度。";
+        if (workerReplyInput) workerReplyInput.value = "";
         await saveLastResult({ status: "running", summary, goalIntent: active.value.intent, acceptedAt: Date.now() });
         setMessage(summary, "success");
       }

@@ -173,30 +173,17 @@ export class AgentStore {
   }
 
   async completeGoal(goalId, { summary, evidenceRefs } = {}) {
-    if (typeof summary !== "string" || !summary.trim() || summary.length > 4_000 ||
-        !Array.isArray(evidenceRefs) || evidenceRefs.length < 1 || evidenceRefs.length > 100 ||
-        evidenceRefs.some((ref) => typeof ref !== "string" || !ref)) {
-      throw new TypeError("Goal completion requires a concise summary and evidence references");
+    const invalidEvidence = evidenceRefs !== undefined && (!Array.isArray(evidenceRefs) || evidenceRefs.length > 100 ||
+      evidenceRefs.some((ref) => typeof ref !== "string" || !ref));
+    if (typeof summary !== "string" || !summary.trim() || summary.length > 4_000 || invalidEvidence) {
+      throw new TypeError("Goal completion requires an LLM result summary and valid optional evidence references");
     }
     const goalKey = `g:${goalId}`;
     const goal = await this.get(COLLECTIONS.GOALS, goalKey);
     if (!goal || goal.value.state !== GoalState.ACTIVE) throw new Error("Only an active Goal can be completed");
-    if (goal.value.triggers.length > 0) throw new Error("A recurring Goal cannot be completed while its triggers remain active");
-
-    let afterKey;
-    let taskCount = 0;
-    do {
-      const page = await this.listTasks(goalId, afterKey, 100);
-      taskCount += page.items.length;
-      if (page.items.some((record) => record.value.state !== TaskState.DONE)) {
-        throw new Error("Goal still has unfinished Tasks");
-      }
-      afterKey = page.nextAfterKey;
-    } while (afterKey);
-    if (taskCount === 0) throw new Error("Goal cannot complete before it has Tasks");
 
     const at = this.now();
-    const value = { ...goal.value, state: GoalState.DONE, progress: summary.trim(), evidenceRefs,
+    const value = { ...goal.value, state: GoalState.DONE, progress: summary.trim(), evidenceRefs: evidenceRefs || [], completionSource: "llm",
       revision: goal.value.revision + 1, updatedAt: at, completedAt: at };
     const result = await this.data.put({ collection: COLLECTIONS.GOALS, key: goalKey, value,
       expectedRevision: goal.revision });

@@ -162,22 +162,23 @@ test("scheduler and dispatch honor Goal state and dependency completion", async 
   assert.equal(failed.status, "failed");
 });
 
-test("Goal completion requires all Tasks done and persisted evidence", async () => {
+test("Goal completion records the LLM judgment without re-evaluating Task or trigger outcomes", async () => {
   const store = new AgentStore(fakeData(), { id: (() => { let id = 0; return () => `complete-${++id}`; })() });
   const goal = await store.createGoal("整理一篇指定文章", { goalId: "goal-complete" });
-  await assert.rejects(() => store.completeGoal(goal.goalId, { summary: "已整理", evidenceRefs: ["file:result"] }), /before it has Tasks/);
   const task = await store.createTask(goal.goalId);
-  await assert.rejects(() => store.completeGoal(goal.goalId, { summary: "已整理", evidenceRefs: ["file:result"] }), /unfinished Tasks/);
-  await store.transitionTask(task.taskId, "running");
-  await store.transitionTask(task.taskId, "done");
-  const completed = await store.completeGoal(goal.goalId, { summary: "已保存文章摘要", evidenceRefs: ["file:summary"] });
+  const completed = await store.completeGoal(goal.goalId, { summary: "LLM 判断文章整理已完成", evidenceRefs: [] });
   assert.equal(completed.value.state, "done");
-  assert.deepEqual(completed.value.evidenceRefs, ["file:summary"]);
+  assert.equal(completed.value.progress, "LLM 判断文章整理已完成");
+  assert.equal(completed.value.completionSource, "llm");
+  assert.deepEqual(completed.value.evidenceRefs, []);
   await assert.rejects(() => store.createTask(goal.goalId), /active Goal/);
 
   const recurring = await store.createGoal("每日整理订阅号", { goalId: "goal-recurring", triggers: [{ type: "daily" }] });
-  await store.createTask(recurring.goalId);
-  await assert.rejects(() => store.completeGoal(recurring.goalId, { summary: "已整理", evidenceRefs: ["file:daily"] }), /recurring Goal/);
+  const recurringDone = await store.completeGoal(recurring.goalId, { summary: "LLM 判断监控目标已结束" });
+  assert.equal(recurringDone.value.state, "done");
+  assert.deepEqual(recurringDone.value.triggers, [{ type: "daily" }]);
+  assert.equal((await store.get("tasks", `t:${task.taskId}`)).value.state, "ready",
+    "completion storage does not infer or rewrite child Task outcomes");
 });
 
 test("pausing a Goal atomically fences an operation prepared from a stale snapshot", async () => {
