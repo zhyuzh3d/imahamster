@@ -1,0 +1,8 @@
+# Per-machine model credentials and endpoint configuration
+/provider-config.local.js
+/provider-config.local.json
+/provider-config.local.*
+
+# Reproducible package artifacts and local OS metadata
+/build/
+.DS_Store

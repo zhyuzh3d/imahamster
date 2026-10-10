@@ -1,0 +1,8 @@
+{
+  "schema": 2,
+  "happId": "life.airen.imhamster",
+  "name": "ImHamster 屏幕交互",
+  "entry": "index.html",
+  "routing": "hash",
+  "version": { "code": 24, "name": "0.1.23" }
+}

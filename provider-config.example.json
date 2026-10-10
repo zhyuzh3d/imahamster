@@ -1,0 +1,5 @@
+{
+  "baseUrl": "https://codebestie.org",
+  "apiKey": "在此处填写你自己的 API key",
+  "model": "gpt-6-luna"
+}

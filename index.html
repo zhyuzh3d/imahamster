@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#f3f5fa">
+  <title>ImHamster</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main class="page">
+    <header class="hero">
+      <div class="brand-mark" aria-hidden="true">H</div>
+      <div>
+        <h1>ImHamster</h1>
+        <p>屏幕助手</p>
+      </div>
+    </header>
+
+    <section class="card" aria-labelledby="status-title">
+      <div class="card-heading">
+        <h2 id="status-title">设备状态</h2>
+        <span id="overall-status" class="overall-status">检查中</span>
+      </div>
+      <ul class="status-list">
+        <li><span class="status-dot" id="dot-authorization"></span><span>ImHamster 授权</span><strong id="authorization-status">检查中</strong></li>
+        <li><span class="status-dot" id="dot-accessibility"></span><span>系统屏幕服务</span><strong id="accessibility-status">检查中</strong></li>
+        <li><span class="status-dot" id="dot-model"></span><span id="model-label">当前模型</span><strong id="model-status">检查中</strong></li>
+        <li><span class="status-dot" id="dot-overlay"></span><span>悬浮球</span><strong id="overlay-status">检查中</strong></li>
+      </ul>
+      <p id="message" role="status" aria-live="polite">正在连接 Haminn…</p>
+
+      <label class="consent-row">
+        <input id="consent" type="checkbox">
+        <span>我同意把当前屏幕截图和指令发送给配置的模型，并允许 ImHamster 按指令操作手机。</span>
+      </label>
+      <p class="privacy-note">截图可能包含当前屏幕上的联系人和聊天内容。</p>
+      <button id="setup-action" class="button primary" type="button" disabled>正在检查…</button>
+    </section>
+
+    <p class="last-result-label">最近一次任务</p>
+    <p id="last-result" class="last-result">尚未运行</p>
+    <p id="run-trace" class="last-result" hidden></p>
+  </main>
+  <script src="provider-config.local.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
