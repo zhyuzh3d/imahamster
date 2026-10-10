@@ -38,6 +38,20 @@
       <button id="setup-action" class="button primary" type="button" disabled>正在检查…</button>
     </section>
 
+    <section id="worker-panel" class="card worker-panel" aria-labelledby="worker-title" hidden>
+      <div class="card-heading">
+        <h2 id="worker-title">后台任务</h2>
+        <span id="worker-state" class="overall-status">检查中</span>
+      </div>
+      <p id="worker-progress" class="worker-progress">尚无后台任务</p>
+      <div class="worker-actions">
+        <button id="worker-pause" class="button secondary" type="button" disabled>暂停</button>
+        <button id="worker-resume" class="button secondary" type="button" disabled>继续</button>
+        <button id="worker-cancel" class="button danger" type="button" disabled>取消全部</button>
+      </div>
+      <p class="privacy-note worker-note">暂停会在停止后台执行后保存进度；继续时先重新截图核对未完成操作。</p>
+    </section>
+
     <p class="last-result-label">最近一次任务</p>
     <p id="last-result" class="last-result">尚未运行</p>
     <p id="run-trace" class="last-result" hidden></p>

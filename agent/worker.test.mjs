@@ -177,3 +177,38 @@ test("an uncertain screen effect blocks another action and stays recoverable", (
   assert.equal(operation.status, "unknown");
   assert.equal(active.pendingOperationId, operation.operationId);
 });
+
+test("paused goals stay paused on Worker start and accept new goals into the queue", () => {
+  const records = new Map();
+  const paused = { goalId: "goal-paused", taskId: "task-paused", runId: "run-paused",
+    intent: "继续观察合成测试画面", state: "paused", step: 1, progress: "用户已暂停任务" };
+  records.set("agent-runtime:active-goal", { value: paused, revision: "1" });
+  let captures = 0;
+
+  function tool(method, params) {
+    if (method === "data.get") return records.get(`${params.collection}:${params.key}`) || null;
+    if (method === "data.scan") return { items: [] };
+    if (method === "data.put") {
+      records.set(`${params.collection}:${params.key}`, { value: params.value, revision: "1" });
+      return { revision: "1" };
+    }
+    if (method === "interaction.capture") { captures += 1; return { mime: "image/jpeg", dataBase64: "c3ludGhldGljLWZyYW1l" }; }
+    throw new Error(`Unexpected tool: ${method}`);
+  }
+
+  function deliver(event) {
+    let output = globalThis.onHaminnEvent(event);
+    for (let turn = 0; output?.actions?.length && turn < 16; turn += 1) {
+      const call = output.actions[0];
+      try { output = globalThis.onHaminnEvent({ type: "tool.result", callId: call.callId, ok: true, result: tool(call.method, call.params) }); }
+      catch (error) { output = globalThis.onHaminnEvent({ type: "tool.result", callId: call.callId, ok: false, error: { message: error.message } }); }
+    }
+    return output;
+  }
+
+  assert.equal(deliver({ type: "start" }).state, "paused");
+  assert.equal(captures, 0, "a paused goal must not observe or act until explicitly resumed");
+  assert.equal(records.get("agent-runtime:active-goal").value.state, "paused");
+  assert.equal(deliver({ type: "goal.submit", intent: "新的合成目标" }).state, "queued");
+  assert.equal(captures, 0);
+});

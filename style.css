@@ -57,6 +57,13 @@ h2 { margin: 0; font-size: 17px; }
 .button:disabled { cursor: not-allowed; opacity: .48; }
 .last-result-label { margin: 18px 3px 5px; color: #8390a5; font-size: 11px; font-weight: 700; }
 .last-result { margin: 0 3px; color: var(--muted); font-size: 12px; line-height: 1.55; overflow-wrap: anywhere; }
+.worker-panel { margin-top: 16px; }
+.worker-progress { margin: 12px 0 0; color: var(--muted); font-size: 12px; line-height: 1.55; overflow-wrap: anywhere; }
+.worker-actions { display: grid; grid-template-columns: 1fr 1fr 1.25fr; gap: 8px; margin-top: 12px; }
+.worker-actions .button { min-height: 42px; padding: 0 8px; font-size: 12px; }
+.secondary { background: #eef2fa; color: #26344c; }
+.danger { background: #fff0f0; color: #a83239; }
+.worker-note { margin: 10px 0 0; }
 
 @media (max-width: 370px) {
   .page { padding-right: 14px; padding-left: 14px; }

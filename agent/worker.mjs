@@ -33,9 +33,13 @@ function activeGoalRecord() {
   const goalId = `g-${now.toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
   const taskId = `t-${now.toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
   state = {
-    goalId, taskId, intent: "", state: "active", step: 0, createdAt: now,
+    goalId, taskId, intent: "", state: "active", step: 0, revision: 1, createdAt: now,
     lastProgressAt: now, progress: "目标已接收，等待首轮屏幕观察。", waiting: null,
   };
+}
+
+function terminal(stateValue) {
+  return ["done", "failed", "cancelled"].includes(stateValue);
 }
 
 function makeGoalAndTask(intent) {
@@ -148,6 +152,7 @@ function parseDecision(text) {
 
 function storeDecision(decision) {
   state.step += 1;
+  state.revision = Number(state.revision || 0) + 1;
   state.lastProgressAt = Date.now();
   state.progress = decision.evidence;
   state.lastDecision = decision;
@@ -174,13 +179,13 @@ function updateGoalAndTask(decision) {
     record("goals", `g:${state.goalId}`, {
       schemaVersion: 1, goalId: state.goalId, intent: state.intent, scope: {}, triggers: [],
       completion: "由模型依据连续截图与操作结果复核用户目标", priority: 0, state: goalState,
-      revision: state.step + 1, acceptedBoundary: "after-creation", progress: state.progress,
+      revision: state.revision, acceptedBoundary: "after-creation", progress: state.progress,
       createdAt: state.createdAt, updatedAt: now, completedAt: state.state === "done" ? now : undefined,
       evidenceRefs: state.state === "done" ? [`screen-step:${state.step}`] : undefined,
     }),
     record("tasks", `t:${state.taskId}`, {
       schemaVersion: 1, taskId: state.taskId, goalId: state.goalId, runId: state.runId,
-      revision: state.step + 1, kind: "screen-work", objective: state.intent, state: taskState,
+      revision: state.revision, kind: "screen-work", objective: state.intent, state: taskState,
       dependencies: [], objectKey: null, progress: state.progress,
       waiting: state.waiting, resultRefs: [`screen-step:${state.step}`], createdAt: state.createdAt, updatedAt: now,
     }),
@@ -260,7 +265,8 @@ function advanceAfterTool(event) {
     }
     case "load-active": {
       state = result?.value || null;
-      if (!state || state.state === "done" || state.state === "failed") return readNextQueuedGoal();
+      if (!state || terminal(state.state)) return readNextQueuedGoal();
+      if (state.state === "paused") return { state: "paused", progress: state.progress || "任务已暂停" };
       state.state = "active";
       pending = "load-provider";
       return action("data.get", { collection: "screen-interaction", key: "provider" });
@@ -299,7 +305,7 @@ function advanceAfterTool(event) {
       return persistDecision(parseDecision(content));
     }
     case "decision-saved": {
-      if (state.state === "done" || state.state === "failed") {
+      if (terminal(state.state)) {
         pending = "completed-queue-read";
         return action("data.scan", { collection: "inbox", prefix: "q:", limit: 1 });
       }
@@ -352,7 +358,7 @@ globalThis.onHaminnEvent = event => {
   try {
     if (event?.type === "goal.submit") {
       if (typeof event.intent !== "string" || !event.intent.trim() || event.intent.length > 16000) throw new Error("用户目标为空或过长");
-      if (state && !["done", "failed"].includes(state.state)) return enqueueGoal(event.intent);
+      if (state && !terminal(state.state)) return enqueueGoal(event.intent);
       const operations = makeGoalAndTask(event.intent);
       state.runId = operations[1].value.runId;
       pending = "create-goal";
@@ -379,7 +385,7 @@ globalThis.onHaminnEvent = event => {
       pending = "load-active";
       return action("data.get", { collection: COLLECTION, key: ACTIVE_KEY });
     }
-    if (event?.type === "tick" && state && ["done", "failed"].includes(state.state)) return readNextQueuedGoal();
+    if (event?.type === "tick" && state && terminal(state.state)) return readNextQueuedGoal();
     if (event?.type === "tool.result") return advanceAfterTool(event);
     return { state: "ignored" };
   } catch (error) {
