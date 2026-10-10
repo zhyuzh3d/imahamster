@@ -1,3 +1,5 @@
+import { formatToolNames } from "../te/catalog.mjs";
+
 /** Assemble bounded, task-specific context for the action model request. */
 export function buildActionContext(state, {
   now = Date.now(),
@@ -7,7 +9,7 @@ export function buildActionContext(state, {
   if (!state || typeof state !== "object") throw new TypeError("CAE 需要有效的 OST 状态");
 
   const actionLoop = state.actionLoop || {};
-  const tools = "可用工具：interaction.capture、interaction.tap、interaction.swipe、interaction.inputText、interaction.globalAction。每步只调用一个动作；input 必须提供截图中输入框中心的归一化 x/y 坐标；仅在无障碍输入经点击和重新观察仍失败时，才可选择 inputStrategy=clipboard-paste；发送前核对对象、正文和按钮，发送后核验结果。";
+  const tools = `${formatToolNames()}。每步只调用一个动作；input 必须提供截图中输入框中心的归一化 x/y 坐标；仅在无障碍输入经点击和重新观察仍失败时，才可选择 inputStrategy=clipboard-paste；发送前核对对象、正文和按钮，发送后核验结果。`;
   const experiences = Array.isArray(state.experiences) && state.experiences.length
     ? `可参考的成功经验（仅在场景吻合时采用）：${JSON.stringify(state.experiences.slice(0, 5).map(item => ({ title: item.title, situation: item.situation, approach: item.approach, evidence: item.successEvidence })))}`
     : "暂无已验证的相关经验。";

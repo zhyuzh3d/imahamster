@@ -4,6 +4,7 @@ import { buildChatCompletionRequest, classifyProviderStatus, parseChatCompletion
 import { buildActionContext } from "./cae/context.mjs";
 import { SYSTEM_PROMPT } from "./cae/prompts.mjs";
 import { retrieveRelevantExperiences } from "./me/retrieval.mjs";
+import { isRegisteredTool } from "./te/catalog.mjs";
 import { attachJournalEvents, makeJournalEntry } from "./observability/journal.mjs";
 import { validateScreenAction } from "./ho/decision.mjs";
 import {
@@ -978,7 +979,7 @@ function requestLearningReview() {
 function saveLearningSuggestion(suggestion) {
   try {
     const operations = [];
-    const toolRefs = value => Array.isArray(value) ? value.filter(name => ["interaction.capture", "interaction.tap", "interaction.swipe", "interaction.inputText", "interaction.globalAction"].includes(name)).slice(0, 8) : [];
+    const toolRefs = value => Array.isArray(value) ? value.filter(isRegisteredTool).slice(0, 8) : [];
     if (suggestion.saveExperience === true && suggestion.experience && state.progress) {
       const item = suggestion.experience;
       const fields = [item.title, item.situation, item.approach, item.successEvidence];
