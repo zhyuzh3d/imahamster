@@ -22,7 +22,7 @@ function persistMockBatch(records, params) {
   return result;
 }
 
-test("a lifecycle CAS conflict reloads durable state before Worker progress continues", () => {
+test("a goal-registration CAS conflict queues its original intent behind the latest durable goal", () => {
   const started = globalThis.onHaminnEvent({ type: "start" });
   assert.equal(started.actions[0].method, "data.get");
   const idle = globalThis.onHaminnEvent({ type: "tool.result", callId: started.actions[0].callId,
@@ -47,25 +47,63 @@ test("a lifecycle CAS conflict reloads durable state before Worker progress cont
   };
   const saved = globalThis.onHaminnEvent({ type: "tool.result", callId: reload.actions[0].callId,
     ok: true, result: { collection: "agent-runtime", key: "active-goal", value: latest, revision: "host-r9" } });
-  assert.equal(saved.actions[0].method, "data.batch");
-  const activeWrite = saved.actions[0].params.operations.find(operation =>
-    operation.collection === "agent-runtime" && operation.key === "active-goal");
-  assert.equal(activeWrite.expectedRevision, "host-r9");
-  assert.equal(activeWrite.value.goalId, "goal-latest");
-  assert.equal(activeWrite.value.state, "paused");
+  assert.equal(saved.actions[0].method, "data.put");
+  assert.equal(saved.actions[0].params.collection, "inbox");
+  assert.equal(saved.actions[0].params.value.intent, "合成 CAS 冲突恢复测试");
+  assert.equal(saved.actions[0].params.value.state, "queued");
 
   const reset = globalThis.onHaminnEvent({ type: "start" });
   globalThis.onHaminnEvent({ type: "tool.result", callId: reset.actions[0].callId, ok: true, result: null });
 });
 
-test("a CAS recovery at the task-done boundary resumes HO handoff and loads the next Task revision", () => {
-  const start = globalThis.onHaminnEvent({ type: "start" });
-  const idle = globalThis.onHaminnEvent({ type: "tool.result", callId: start.actions[0].callId, ok: true, result: null });
-  assert.equal(idle.state, "idle");
-  const submitted = globalThis.onHaminnEvent({ type: "goal.submit", intent: "合成 task-done 冲突恢复" });
-  const reloading = globalThis.onHaminnEvent({ type: "tool.result", callId: submitted.actions[0].callId,
-    ok: false, error: { code: "E_CONFLICT", message: "revision changed" } });
+test("a goal-registration CAS conflict preserves the submitted intent and queues it behind a concurrent OST", () => {
+  const records = new Map();
+  const submittedIntent = "并发时也不能丢失的合成用户目标";
+  const eventId = "goal-registration-cas-submit";
 
+  const started = globalThis.onHaminnEvent({ type: "start" });
+  const idle = globalThis.onHaminnEvent({ type: "tool.result", callId: started.actions[0].callId,
+    ok: true, result: null });
+  assert.equal(idle.state, "idle");
+  let output = globalThis.onHaminnEvent({ type: "goal.submit", eventId, intent: submittedIntent });
+  assert.equal(output.actions[0].params.key, eventReceiptKey(eventId));
+  output = globalThis.onHaminnEvent({ type: "tool.result", callId: output.actions[0].callId, ok: true, result: null });
+  assert.equal(output.actions[0].method, "data.batch");
+  assert.ok(output.actions[0].params.operations.some(operation => operation.collection === "agent-runtime" &&
+    operation.key === "active-goal"));
+
+  const concurrentlyStarted = { goalId: "g-concurrent-ost", taskId: "t-concurrent-ost", runId: "run-concurrent-ost",
+    intent: "并发开始的另一个合成 OST", state: "active", taskType: "one-shot", taskKind: "OST", revision: 1,
+    progress: "并发目标正在运行" };
+  records.set("agent-runtime:active-goal", { value: concurrentlyStarted, revision: "active-r2" });
+  output = globalThis.onHaminnEvent({ type: "tool.result", callId: output.actions[0].callId, ok: false,
+    error: { code: "E_CONFLICT", message: "active-goal revision changed" } });
+  assert.equal(output.actions[0].params.key, eventReceiptKey(eventId));
+  output = globalThis.onHaminnEvent({ type: "tool.result", callId: output.actions[0].callId, ok: true, result: null });
+  assert.deepEqual(output.actions[0].params, { collection: "agent-runtime", key: "active-goal" });
+  output = globalThis.onHaminnEvent({ type: "tool.result", callId: output.actions[0].callId, ok: true,
+    result: { value: concurrentlyStarted, revision: "active-r2" } });
+  assert.equal(output.actions[0].method, "data.batch");
+  const queueWrite = output.actions[0].params.operations.find(operation => operation.collection === "inbox");
+  assert.equal(queueWrite.value.intent, submittedIntent);
+  assert.equal(queueWrite.value.eventId, eventId);
+  assert.equal(queueWrite.value.state, "queued");
+  assert.equal(output.actions[0].params.operations.some(operation => operation.collection === "agent-runtime" &&
+    operation.key === "active-goal"), false, "queue recovery must preserve the concurrent OST record");
+
+  output = globalThis.onHaminnEvent({ type: "tool.result", callId: output.actions[0].callId, ok: true,
+    result: persistMockBatch(records, output.actions[0].params) });
+  assert.equal(output.state, "queued");
+  assert.equal(records.get("agent-runtime:active-goal").value.goalId, concurrentlyStarted.goalId);
+  assert.equal(records.get(`inbox:${queueWrite.key}`).value.intent, submittedIntent);
+  assert.equal(records.get(`inbox:${queueWrite.key}`).value.eventId, eventId);
+  assert.equal(records.get(`agent-runtime:${eventReceiptKey(eventId)}`).value.queued, true);
+
+  const reset = globalThis.onHaminnEvent({ type: "start" });
+  globalThis.onHaminnEvent({ type: "tool.result", callId: reset.actions[0].callId, ok: true, result: null });
+});
+
+test("a restored task-done decision resumes HO handoff and loads the next Task revision", () => {
   const now = Date.now();
   const first = { taskId: "task-cas-first", runId: "run-first", objective: "读取最新消息", kind: "screen-work",
     state: "done", dependencies: [], objectKey: null, revision: 2, createdAt: now, planIndex: 0, progress: "已读取" };
@@ -75,24 +113,20 @@ test("a CAS recovery at the task-done boundary resumes HO handoff and loads the 
     goalId: "goal-cas-recovery", taskId: first.taskId, runId: first.runId, intent: "读取新消息并核对回复",
     state: "active", taskType: "one-shot", taskKind: "OST", step: 2, revision: 5, createdAt: now,
     goalAttemptStartedAt: now, goalDeadlineAt: now + 1_000_000, progress: "已读取",
+    goalPlan: { dependencies: [], objectKey: null }, taskPlan: { dependencies: [], objectKey: null },
+    taskRecordKind: "screen-work",
     taskGraph: { coordinatorTaskId: "task-cas-coordinator", coordinatorRunId: "run-coordinator",
       coordinatorRevision: 2, currentTaskId: first.taskId, createdAt: now, tasks: [first, second] },
     lastDecision: { state: "task-done", evidence: "已读取最新消息" }, trace: [],
   };
-  const loaded = globalThis.onHaminnEvent({ type: "tool.result", callId: reloading.actions[0].callId, ok: true,
+  const start = globalThis.onHaminnEvent({ type: "start" });
+  assert.equal(start.actions[0].params.key, "active-goal");
+  const target = globalThis.onHaminnEvent({ type: "tool.result", callId: start.actions[0].callId, ok: true,
     result: { value: active, revision: "active-r9" } });
-  assert.equal(loaded.actions[0].params.key, `g:${active.goalId}`);
-  const goal = globalThis.onHaminnEvent({ type: "tool.result", callId: loaded.actions[0].callId, ok: true,
-    result: { value: { goalId: active.goalId, state: "active" }, revision: "goal-r3" } });
-  assert.equal(goal.actions[0].params.key, `t:${first.taskId}`);
-  const task = globalThis.onHaminnEvent({ type: "tool.result", callId: goal.actions[0].callId, ok: true,
-    result: { value: first, revision: "task-first-r2" } });
-  assert.equal(task.actions[0].method, "data.get");
-  assert.equal(task.actions[0].params.key, `t:${second.taskId}`);
-
-  const target = globalThis.onHaminnEvent({ type: "tool.result", callId: task.actions[0].callId, ok: true,
+  assert.equal(target.actions[0].method, "data.get");
+  assert.equal(target.actions[0].params.key, `t:${second.taskId}`);
+  const handoff = globalThis.onHaminnEvent({ type: "tool.result", callId: target.actions[0].callId, ok: true,
     result: { value: second, revision: "task-second-r4" } });
-  const handoff = target;
   assert.equal(handoff.actions[0].method, "data.batch");
   const operations = handoff.actions[0].params.operations;
   const nextWrite = operations.find(operation => operation.collection === "tasks" && operation.key === `t:${second.taskId}`);

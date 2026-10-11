@@ -121,6 +121,7 @@ const lifecycleRevisions = new Map();
 let storageConflictAttempts = 0;
 let storageConflictContext = null;
 let pendingGoalSubmit = null;
+let pendingGoalRegistration = null;
 let pendingNotificationEvent = null;
 let pendingNotificationRecord = null;
 let pendingTimerEvent = null;
@@ -287,6 +288,16 @@ function beginStorageConflictRecovery(error, method, failedStage) {
     pending = "goal-control-conflict-receipt-read";
     return action("data.get", { collection: COLLECTION, key: eventReceiptKey(pendingGoalControl.eventId) });
   }
+  if (stage === "create-goal" && pendingGoalRegistration) {
+    storageConflictContext.kind = "goal-registration";
+    storageConflictContext.intent = pendingGoalRegistration.intent;
+    storageConflictContext.eventId = pendingGoalRegistration.eventId;
+    if (pendingGoalRegistration.eventId) {
+      pending = "goal-registration-conflict-receipt-read";
+      return action("data.get", { collection: COLLECTION,
+        key: eventReceiptKey(pendingGoalRegistration.eventId) });
+    }
+  }
   if (stage.startsWith("event-task-control-") && pendingEventTaskControl) {
     storageConflictContext.kind = "event-task-control";
     pending = "event-task-control-conflict-receipt-read";
@@ -360,6 +371,24 @@ function continueEventTaskRegistrationRecovery(context) {
     return enqueueGoal(context.intent);
   }
   return restartGoalAfterStorageConflict(context.intent);
+}
+
+function continueGoalRegistrationRecovery(context) {
+  if (typeof context?.intent !== "string" || !context.intent.trim()) {
+    throw new Error("OST 创建冲突恢复缺少原始用户指令");
+  }
+  pendingGoalSubmit = null;
+  if (state && !terminal(state.state)) {
+    storageConflictContext = null;
+    return enqueueGoal(context.intent, context.eventId || null);
+  }
+  storageConflictContext = null;
+  const operations = makeGoalAndTask(context.intent, context.eventId || null);
+  state.runId = operations[1].value.runId;
+  appendTrace("goal.accepted", { intentLength: context.intent.length,
+    ...(context.eventId ? { eventId: context.eventId } : {}), source: "storage-conflict-recovery" });
+  pending = "create-goal";
+  return action("data.batch", { operations });
 }
 
 function continueAfterStorageConflict() {
@@ -2144,6 +2173,9 @@ function advanceAfterTool(event) {
   switch (pending) {
     case "storage-conflict-active-read": {
       state = result?.value || null;
+      if (storageConflictContext?.kind === "goal-registration") {
+        return continueGoalRegistrationRecovery(storageConflictContext);
+      }
       if (!state) return continueAfterStorageConflict();
       if (terminal(state.state) || state.state === "paused" || state.state === "waiting" ||
           ["event-match", "unclassified"].includes(state.taskType) || !state.goalId || !state.taskId) {
@@ -2239,6 +2271,22 @@ function advanceAfterTool(event) {
       control.activeRecord = result;
       return control.command === "cancel" ? readGoalControlQueue() : readGoalControlGoal();
     }
+    case "goal-registration-conflict-receipt-read": {
+      const registration = pendingGoalRegistration;
+      const receipt = result?.value;
+      if (!registration) throw new Error("OST 创建冲突恢复缺少原始提交");
+      if (receipt) {
+        if (receipt.eventId !== registration.eventId || receipt.type !== "goal.submit") {
+          throw new Error("OST 提交事件 ID 已被其他事件占用");
+        }
+        pendingGoalRegistration = null;
+        pendingGoalSubmit = null;
+        storageConflictContext = null;
+        return { state: state?.state || "idle", duplicate: true, eventId: registration.eventId, receipt };
+      }
+      pending = "storage-conflict-active-read";
+      return action("data.get", { collection: COLLECTION, key: ACTIVE_KEY });
+    }
     case "goal-control-active-read": {
       const control = pendingGoalControl;
       if (!control) throw new Error("用户任务控制上下文已丢失");
@@ -2269,6 +2317,7 @@ function advanceAfterTool(event) {
         error: control?.receipt?.error || "用户任务控制未完成，可重试。" };
     }
     case "create-goal":
+      pendingGoalRegistration = null;
       pending = "get-provider";
       return action("data.get", { collection: "screen-interaction", key: "provider" });
     case "goal-submit-receipt-read": {
@@ -2277,6 +2326,7 @@ function advanceAfterTool(event) {
       if (!incoming) throw new Error("目标事件收据检查缺少原始事件");
       if (result?.value) return { state: state?.state || "idle", duplicate: true, eventId: incoming.eventId };
       if (state && !terminal(state.state)) return enqueueGoal(incoming.intent, incoming.eventId);
+      pendingGoalRegistration = { intent: incoming.intent, eventId: incoming.eventId };
       const operations = makeGoalAndTask(incoming.intent, incoming.eventId);
       state.runId = operations[1].value.runId;
       appendTrace("goal.accepted", { intentLength: incoming.intent.trim().length, eventId: incoming.eventId });
@@ -2518,7 +2568,9 @@ function advanceAfterTool(event) {
       state: "event-start-pending", eventId: state.pendingEventStartFor,
       goalId: state.goalId, progress: state.progress,
     };
-    case "queue-saved": return { state: "queued" };
+    case "queue-saved":
+      pendingGoalRegistration = null;
+      return { state: "queued" };
     case "task-plan-saved": {
       const plan = state.pendingActionLoopPlan;
       delete state.pendingActionLoopPlan;
@@ -2853,6 +2905,7 @@ globalThis.onHaminnEvent = event => {
         return action("data.get", { collection: COLLECTION, key: eventReceiptKey(eventId) });
       }
       if (state && !terminal(state.state)) return enqueueGoal(event.intent);
+      pendingGoalRegistration = { intent: event.intent.trim(), eventId: null };
       const operations = makeGoalAndTask(event.intent);
       state.runId = operations[1].value.runId;
       appendTrace("goal.accepted", { intentLength: event.intent.trim().length });
@@ -2892,6 +2945,7 @@ globalThis.onHaminnEvent = event => {
       pendingEventTaskSubscriptionRecovery = null;
       pendingEventTaskControl = null;
       pendingGoalSubmit = null;
+      pendingGoalRegistration = null;
       pendingGoalControl = null;
       startupNeedsQueueDrain = false;
       controlNeedsQueueDrain = false;
