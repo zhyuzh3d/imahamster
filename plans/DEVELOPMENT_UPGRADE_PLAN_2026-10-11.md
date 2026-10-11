@@ -571,6 +571,19 @@ JS 测试适合纯状态与组装；QuickJS/Android 仪器测试负责真实模�
 - 新增与 OST 状态分离的 `postTaskQueueRecovery` 生命周期字段。可重试读取错误会先连同事件日志写入活动记录，再用 5 秒起步、封顶 5 分钟的退避安排 Worker tick；连续 8 次仍失败或出现不可重试错误时，面板显示原因并提供“重试后台恢复”。该操作重启后台 Worker 以重新处理持久队列，不把已完成 OST 改回运行态。成功读取后记录恢复并清零本轮次数。
 - 合成 Worker 测试覆盖一次瞬态故障自动恢复、八次故障转为人工重试、Worker 重启清零本轮计数，以及成功后 OST 始终维持完成态；面板状态测试确认终态 OST 可单独呈现后台恢复按钮。全量 `node --test` 113/113 通过，`node --check app.js`、`node --check agent/worker.mjs` 与 `git diff --check` 通过。DEV watcher 已发布更新文件树，但目标仍未前台可见；真机尚未验证此改动。
 
+### 10.34 用户生命周期控制归并到 HO（2026-10-11）
+
+- 过程审查发现，暂停/继续/取消按钮绕开 HO，由 `app.js` 直接写 `active-goal`、Goal 和 Task；继续操作还可能再投递 `goal.resume`，形成两个生命周期写入者。取消也只清理 ImHamster 数据集合中的 `q:`，没有撤销 Haminn SQLite 中尚未交付的 `goal.submit`，所以取消后旧提交仍可能恢复执行。
+- `app.js` 现在只停止正在运行的 Worker、投递带稳定事件 ID 的 `goal.control` 并等待 Worker 回执。Haminn Host 仅允许 ImHamster 使用此事件，并把它放进既有控制优先队列，确保先于 Worker.start 和普通提交事件处理。Worker/HO 在 Worker 入口读取幂等回执、活动 OST/Goal/Task，生成带 revision 检查的单次原子状态转换和日志；取消按页清空本地 OST 队列，每页与累计进度回执一起保存，存储读写错误会保留宿主持久事件以便恢复。业务操作结果的判断仍由 LLM 完成。
+- Haminn 在接受新取消事件的同一 SQLite 事务中，将先前仍排队的 `goal.submit` 标为完成并清空 payload；重复取消事件不触碰取消之后的新提交。队列额度已满时不会产生部分清理或接受状态。定向 Android 仪器测试覆盖清理顺序、重复事件、后续新提交和控制队列满时不误删。
+- ImHamster 全量 `node --test` 为 115/115 通过，`node --check app.js`、Worker/HO 语法检查及 `git diff --check` 通过。此前以 `/usr/bin/java` 启动 Gradle 失败；确认主机已安装 OpenJDK 17，只是未加入默认 PATH 后，使用该 JDK 在 API 37 AVD 执行 `:app:connectedDebugAndroidTest` 的 `WorkerHostServiceTest`，编译成功且 5/5 通过，覆盖取消队列清理、控制队列满时无副作用、重复事件与非 ImHamster 权限拒绝。该证据仅说明模拟器宿主路径通过，不能替代 CMA-AN00 真机验收。ADB 和系统 USB 列表仍未出现目标设备；本节不关闭 U0/U1，也不构成设备交付证据。
+
+### 10.35 活跃 Goal/Task 计划字段在重启与进度更新间保持（2026-10-11）
+
+- 对照现有 `Goal` / `Task` schema 和升级目标复核后确认：Worker 每次写入进度都会重新拼整条记录，把 `scope`、`triggers`、`completion`、优先级、Task 依赖及 `objectKey` 重置成空默认值；同时，旧版 Worker 状态没有计划投影，恢复也不会从持久记录补载。这是复杂任务计划接入 HO 前必须消除的数据丢失缺陷。
+- 将计划投影和进度记录组装收敛到 `agent/ho/records.mjs`。Worker 创建 OST 时将受控 Goal/Task 计划字段留在活动状态；从旧状态恢复时，对缺失投影顺序读取已保存 Goal 与 Task，再继续原恢复路径；后续更新保留触发规则、范围、完成说明、优先级、依赖、对象键及 OST/EDT 来源标记。宿主数据读取失败仍走既有关键持久读取恢复通道。
+- 新增 Worker 重启集成回归：预置带有非默认 Goal/Task 计划字段的旧活动状态，在启动时补载并由模型完成后，确认这些字段仍在持久记录中；另覆盖读取计划失败时必须停止恢复并保留可恢复存储错误。全量 `node --test` 117/117 通过，`node --check app.js`、`node --check agent/worker.mjs` 与 `git diff --check` 通过。该修复仅保证计划字段不丢失，不代表 Worker 已接入 `AgentStore` 或已具备 LLM 复杂目标拆分及多 Task 调度；后两项仍属未完成的 HO 能力。CMA-AN00 当前仍未出现在 `adb devices -l`，未部署或重复执行真机实验。
+
 ## 11. 交付与完成判定
 
 ImHamster 与 Haminn 独立提交、验证和推送；每次提交前核对各自 Git 根与 origin，保留无关工作区改动。宿主新增合同需同步 SDK/能力文档/实际实现，消费者只接入确实支持的能力。

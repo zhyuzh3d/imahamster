@@ -41,6 +41,7 @@
   let submissionDeadlineAt = 0;
   let workerControlBusy = false;
   let hoControlModule = null;
+  let eventReceiptModule = null;
   let workerPanelStateModule = null;
   let selfModelPanelController = null;
   let toolPanelController = null;
@@ -1084,10 +1085,38 @@
     }
   }
 
-  async function applyHoUserControl(command, reply = "") {
-    hoControlModule ||= import("./agent/ho/control.mjs");
-    const { applyUserControl } = await hoControlModule;
-    return applyUserControl(haminn.data, { command, reply });
+  async function waitForGoalControl(eventId) {
+    eventReceiptModule ||= import("./agent/ho/events.mjs");
+    const { eventReceiptKey } = await eventReceiptModule;
+    const key = eventReceiptKey(eventId);
+    const deadline = Date.now() + 12_000;
+    let receipt = null;
+    while (Date.now() < deadline) {
+      receipt = (await haminn.data.get({ collection: "agent-runtime", key }))?.value || null;
+      if (receipt?.eventId === eventId && receipt.type === "goal.control" &&
+          ["completed", "retryable-error"].includes(receipt.state)) break;
+      await sleep(200);
+    }
+    if (receipt?.state === "retryable-error") throw new Error(receipt.error || "任务控制尚未完成，可重试。");
+    if (receipt?.state !== "completed" || receipt.eventId !== eventId) {
+      throw new Error("后台 Worker 尚未确认任务控制；控制事件仍保存在宿主队列，可稍后重试。");
+    }
+    return receipt;
+  }
+
+  async function dispatchGoalControl(command, reply = "", { startWorker = true } = {}) {
+    const identity = { command, reply: String(reply || "").trim().slice(0, 1200) };
+    const current = await haminn.workers.status();
+    if (current?.state === "running") await stopWorkerAndWait();
+    const eventId = await prepareDispatchEventId("goal.control", identity);
+    const dispatched = await submissionCall(() => haminn.workers.dispatch({ event: {
+      type: "goal.control", ...identity, eventId,
+    } }), 5000, "任务控制投递超时；控制事件会保留在本机，可重试。", "WORKER_GOAL_CONTROL_TIMEOUT");
+    if (!dispatched?.accepted) throw new Error(`后台 Worker 未接收任务控制（${dispatched?.state || "未知状态"}）。`);
+    await clearDispatchEventId("goal.control", eventId);
+    if (!startWorker) return { eventId, queued: true };
+    await ensureWorkerRunningForControl();
+    return waitForGoalControl(eventId);
   }
 
   async function controlWorker(actionName) {
@@ -1096,21 +1125,20 @@
     await renderWorkerPanel({ value: { state: "active" } }, 0, "running");
     try {
       if (actionName === "pause") {
-        await stopWorkerAndWait();
-        const control = await applyHoUserControl("pause");
-        const summary = control.updated ? "后台任务已暂停，进度已保存。" : "后台 Worker 已停止；没有活动任务需要暂停。";
-        if (control.updated) await saveLastResult({ status: "paused", summary, finishedAt: Date.now() });
+        const control = await dispatchGoalControl("pause");
+        const summary = control.outcome === "applied" ? "后台任务已暂停，进度已保存。" : "没有活动任务需要暂停。";
+        if (control.outcome === "applied") await saveLastResult({ status: "paused", summary, finishedAt: Date.now() });
         setMessage(summary, "success");
       } else if (actionName === "cancel") {
         const current = await readWorkerTaskState();
         const liveEventTasks = current.eventTasks.map(item => item?.value).filter(item => item && item.state !== "cancelled");
-        await stopWorkerAndWait();
-        const control = await applyHoUserControl("cancel");
+        const controlEvent = await dispatchGoalControl("cancel", "", { startWorker: false });
         for (const task of liveEventTasks) {
           await dispatchEventTaskControl(task.eventTaskId, "cancel", "", { startWorker: false });
         }
+        await ensureWorkerRunningForControl();
+        const control = await waitForGoalControl(controlEvent.eventId);
         if (liveEventTasks.length) {
-          await ensureWorkerRunningForControl();
           const deadline = Date.now() + 10_000;
           while (Date.now() < deadline) {
             const remaining = await Promise.all(liveEventTasks.map(async task => {
@@ -1126,11 +1154,10 @@
             if (latest?.value?.state !== "cancelled") stillLive.push(task.eventTaskId);
           }
           if (stillLive.length) throw new Error(`部分事件任务尚未确认取消（${stillLive.length} 项）；后台控制已排队，可重试。`);
-          await stopWorkerAndWait();
         }
-        const summary = control.updated || control.queuedCancelled
-          || liveEventTasks.length ? `已取消当前后台任务、${liveEventTasks.length} 项事件任务，并清除 ${control.queuedCancelled} 项排队任务。`
-          : "后台 Worker 已停止；没有活动或排队任务需要取消。";
+        const summary = control.outcome === "applied" || control.queuedCancelled || liveEventTasks.length
+          ? `已取消当前后台任务、${liveEventTasks.length} 项事件任务，并撤销取消前已排队的目标（本地队列移除 ${control.queuedCancelled} 项）。`
+          : "没有活动或排队目标需要取消。";
         await saveLastResult({ status: "cancelled", summary, finishedAt: Date.now() });
         setMessage(summary, "success");
       } else if (actionName === "resume") {
@@ -1163,10 +1190,9 @@
         }
         const reply = String(workerReplyInput?.value || "").trim().slice(0, 1200);
         const shouldDispatchResume = !!active && ["waiting", "paused", "failed"].includes(active.state);
-        const control = shouldDispatchResume ? await applyHoUserControl("resume", reply) : null;
+        const control = shouldDispatchResume ? await dispatchGoalControl("resume", reply) : null;
         let started = await haminn.workers.status();
-        const wasAlreadyRunning = started?.state === "running";
-        if (!wasAlreadyRunning) started = await haminn.workers.start();
+        if (started?.state !== "running") started = await haminn.workers.start();
         if (started?.state === "waiting-user") throw new Error("后台运行授权尚未授予；任务没有继续。");
         const deadline = Date.now() + 12_000;
         let current = started;
@@ -1198,13 +1224,6 @@
             await sleep(200);
           }
           if (!restored) throw new Error("Worker 已启动，但原始 OST 状态仍未恢复；没有重复提交任务，可再次重试。");
-        }
-        if (shouldDispatchResume && wasAlreadyRunning) {
-          const eventId = await prepareDispatchEventId("goal.resume", { goalId: active.goalId, reply });
-          const resumed = await submissionCall(() => haminn.workers.dispatch({ event: { type: "goal.resume", reply, eventId } }),
-            5000, "任务恢复指令投递超时；进度仍保存在本机。", "WORKER_RESUME_TIMEOUT");
-          if (!resumed?.accepted) throw new Error(`后台 Worker 未接受恢复指令（${resumed?.state || "未知状态"}）。`);
-          await clearDispatchEventId("goal.resume", eventId);
         }
         const resumedIntent = control?.intent || active?.intent || lastResult?.goalIntent;
         const summary = "后台任务已继续；正在重新观察屏幕并恢复进度。";

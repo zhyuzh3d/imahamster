@@ -12,6 +12,7 @@ import { isRegisteredTool } from "./te/catalog.mjs";
 import { retrieveRelevantToolCandidates } from "./te/retrieval.mjs";
 import { attachJournalEvents, makeJournalEntry } from "./observability/journal.mjs";
 import { validateScreenAction } from "./ho/decision.mjs";
+import { goalPlanFromRecord, goalProgressRecord, taskPlanFromRecord, taskProgressRecord } from "./ho/records.mjs";
 import {
   beginGlobalActionReceipt,
   classifyGlobalActionStatus,
@@ -19,6 +20,7 @@ import {
   GLOBAL_ACTION_POLL_WAIT_MS,
 } from "./ho/global-action-receipts.mjs";
 import { assertEventId, createEventReceipt, eventReceiptKey } from "./ho/events.mjs";
+import { prepareUserControlTransition } from "./ho/control.mjs";
 import { applyCurrentOperationOutcome, ensurePendingOperationHistory, rememberPendingOperation } from "./ho/operations.mjs";
 import { recordRecoveryFailure } from "./ho/recovery-signals.mjs";
 import {
@@ -58,8 +60,11 @@ const GLOBAL_ACTION_RECEIPT_STAGES = new Set([
   "global-action-poll-wait", "global-action-status",
 ]);
 const CRITICAL_STATE_READ_STAGES = new Set([
-  "load-active", "goal-submit-receipt-read", "notification-receipt-read", "timer-receipt-read",
+  "load-active", "load-active-goal-plan", "load-active-task-plan",
+  "goal-submit-receipt-read", "notification-receipt-read", "timer-receipt-read",
   "event-task-control-receipt-read", "event-task-control-task-read",
+  "goal-control-receipt-read", "goal-control-active-read", "goal-control-goal-read", "goal-control-task-read",
+  "goal-control-queue-read",
 ]);
 const POST_TASK_QUEUE_READ_STAGES = new Set([
   "queue-read", "completed-queue-read", "notification-read", "timer-read",
@@ -91,6 +96,7 @@ let pendingTimerEvent = null;
 let pendingTimerRecord = null;
 let pendingEventTaskRecord = null;
 let pendingEventTaskControl = null;
+let pendingGoalControl = null;
 let startupNeedsQueueDrain = false;
 let controlNeedsQueueDrain = false;
 
@@ -470,6 +476,9 @@ function makeGoalAndTask(intent, eventId = null) {
     dependencies: [], objectKey: null, progress: state.progress, waiting: null, resultRefs: [],
     createdAt: now, updatedAt: now,
   };
+  state.goalPlan = goalPlanFromRecord(goal);
+  state.taskPlan = taskPlanFromRecord(task);
+  state.taskRecordKind = task.kind;
   const operations = [
     record("goals", `g:${state.goalId}`, goal),
     record("tasks", `t:${state.taskId}`, task),
@@ -527,6 +536,101 @@ function beginEventTaskControl(event) {
   pendingEventTaskControl = { eventId, eventTaskId, command, reply };
   pending = "event-task-control-receipt-read";
   return action("data.get", { collection: COLLECTION, key: eventReceiptKey(eventId) });
+}
+
+function beginGoalControl(event) {
+  const eventId = assertEventId(event.eventId);
+  const command = String(event.command || "");
+  if (!["pause", "resume", "cancel"].includes(command)) throw new TypeError("用户任务控制命令无效");
+  const reply = String(event.reply || "").trim();
+  if (reply.length > 1200) throw new TypeError("用户补充信息过长");
+  pendingGoalControl = { eventId, command, reply, queuedCancelled: 0, receipt: null };
+  pending = "goal-control-receipt-read";
+  return action("data.get", { collection: COLLECTION, key: eventReceiptKey(eventId) });
+}
+
+function readGoalControlActive() {
+  pending = "goal-control-active-read";
+  return action("data.get", { collection: COLLECTION, key: ACTIVE_KEY });
+}
+
+function readGoalControlQueue() {
+  pending = "goal-control-queue-read";
+  return action("data.scan", { collection: "inbox", prefix: "q:", limit: 100 });
+}
+
+function saveGoalControlQueuePage(items) {
+  const control = pendingGoalControl;
+  if (!control) throw new Error("用户任务控制上下文已丢失");
+  const receipt = { ...(control.receipt || createEventReceipt(control.eventId, "goal.control")),
+    eventId: control.eventId, type: "goal.control", state: "prepared", command: control.command,
+    queuedCancelled: control.queuedCancelled + items.length, updatedAt: Date.now() };
+  control.receipt = receipt;
+  control.queuedCancelled += items.length;
+  pending = "goal-control-queue-page-saved";
+  return action("data.batch", { operations: [
+    ...items.map(item => ({ op: "delete", collection: "inbox", key: item.key, expectedRevision: item.revision })),
+    record(COLLECTION, eventReceiptKey(control.eventId), receipt),
+  ] });
+}
+
+function readGoalControlGoal() {
+  const control = pendingGoalControl;
+  const active = control?.activeRecord?.value;
+  if (!active?.goalId) return finishGoalControlTransition();
+  pending = "goal-control-goal-read";
+  return action("data.get", { collection: "goals", key: `g:${active.goalId}` });
+}
+
+function readGoalControlTask() {
+  const control = pendingGoalControl;
+  const active = control?.activeRecord?.value;
+  if (!active?.taskId) return finishGoalControlTransition();
+  pending = "goal-control-task-read";
+  return action("data.get", { collection: "tasks", key: `t:${active.taskId}` });
+}
+
+function finishGoalControlTransition() {
+  const control = pendingGoalControl;
+  if (!control) throw new Error("用户任务控制上下文已丢失");
+  const plan = prepareUserControlTransition({ activeRecord: control.activeRecord,
+    goalRecord: control.goalRecord, taskRecord: control.taskRecord, command: control.command,
+    reply: control.reply, queuedCancelled: control.queuedCancelled });
+  const now = Date.now();
+  const active = control.activeRecord?.value;
+  const receipt = { ...(control.receipt || createEventReceipt(control.eventId, "goal.control")),
+    eventId: control.eventId, type: "goal.control", state: "completed", command: control.command,
+    outcome: plan.updated ? "applied" : "unchanged", resultState: plan.nextActive?.state || active?.state || "idle",
+    goalId: active?.goalId || null, taskId: active?.taskId || null,
+    intent: plan.intent, queuedCancelled: control.queuedCancelled, completedAt: now };
+  control.plan = plan;
+  control.receipt = receipt;
+  pending = "goal-control-final-saved";
+  return action("data.batch", { operations: [
+    ...plan.operations,
+    record(COLLECTION, eventReceiptKey(control.eventId), receipt),
+  ] });
+}
+
+function saveGoalControlFailure(error) {
+  const control = pendingGoalControl;
+  if (!control) return { state: "failed", error: String(error?.message || error).slice(0, 240) };
+  const reason = String(error?.message || error).slice(0, 240);
+  const receipt = { ...(control.receipt || createEventReceipt(control.eventId, "goal.control")),
+    eventId: control.eventId, type: "goal.control", state: "retryable-error", command: control.command,
+    queuedCancelled: control.queuedCancelled, error: reason, updatedAt: Date.now() };
+  control.receipt = receipt;
+  pending = "goal-control-failure-saved";
+  return action("data.put", { collection: COLLECTION, key: eventReceiptKey(control.eventId), value: receipt });
+}
+
+function continueAfterGoalControl() {
+  const control = pendingGoalControl;
+  pendingGoalControl = null;
+  controlNeedsQueueDrain = true;
+  return { state: control?.receipt?.resultState || "idle", controlApplied: control?.receipt?.outcome === "applied",
+    duplicate: false, eventId: control?.eventId, queuedCancelled: Number(control?.receipt?.queuedCancelled || 0),
+    receipt: control?.receipt || null };
 }
 
 function eventTaskControlJournal(eventTask, phase, fields = {}) {
@@ -821,6 +925,7 @@ function createTimerTriggeredOst(event, eventTask, inboxRecord) {
   operations[0].value.parentEventTaskId = eventTask.eventTaskId;
   operations[0].value.sourceEventId = event.eventId;
   operations[1].value.kind = "event-triggered-work";
+  state.taskRecordKind = operations[1].value.kind;
   operations[1].value.parentEventTaskId = eventTask.eventTaskId;
   operations[1].value.sourceEventId = event.eventId;
   const receipt = createEventReceipt(event.eventId, "timer.fired", {
@@ -940,6 +1045,7 @@ function saveEventMatchDecision(value) {
   goalOperations[0].value.parentEventTaskId = eventTask.eventTaskId;
   goalOperations[0].value.sourceEventId = event.eventId;
   goalOperations[1].value.kind = "event-triggered-work";
+  state.taskRecordKind = goalOperations[1].value.kind;
   goalOperations[1].value.parentEventTaskId = eventTask.eventTaskId;
   goalOperations[1].value.sourceEventId = event.eventId;
   goalOperations.push(...operations);
@@ -956,6 +1062,16 @@ function prepareGoalResume(reply = "") {
   state.recoveryAttempts = 0;
   startActiveSegment();
   pending = "resume-provider";
+  return action("data.get", { collection: "screen-interaction", key: "provider" });
+}
+
+function continueAfterActiveLoad() {
+  if (state.state === "paused") return { state: "paused", progress: state.progress || "任务已暂停" };
+  if (state.waiting?.userRequired) return { state: "waiting", progress: state.progress, userRequired: true };
+  state.state = "active";
+  state.activeSegmentStartedAt = null;
+  startActiveSegment();
+  pending = "load-provider";
   return action("data.get", { collection: "screen-interaction", key: "provider" });
 }
 
@@ -1438,19 +1554,8 @@ function updateGoalAndTask(decision) {
   const goalState = state.state === "done" ? "done" : state.state === "failed" ? "active" : "active";
   const taskState = state.state === "done" ? "done" : state.state === "failed" ? "failed" : state.state === "waiting" ? "waiting" : "running";
   return [
-    record("goals", `g:${state.goalId}`, {
-      schemaVersion: 1, goalId: state.goalId, intent: state.intent, scope: {}, triggers: [],
-      completion: "由模型依据连续截图与操作结果复核用户目标", priority: 0, state: goalState,
-      revision: state.revision, acceptedBoundary: "after-creation", progress: state.progress,
-      createdAt: state.createdAt, updatedAt: now, completedAt: state.state === "done" ? now : undefined,
-      evidenceRefs: state.state === "done" ? [`screen-step:${state.step}`] : undefined,
-    }),
-    record("tasks", `t:${state.taskId}`, {
-      schemaVersion: 1, taskId: state.taskId, goalId: state.goalId, runId: state.runId,
-      revision: state.revision, kind: "screen-work", objective: state.intent, state: taskState,
-      dependencies: [], objectKey: null, progress: state.progress,
-      waiting: state.waiting, resultRefs: [`screen-step:${state.step}`], createdAt: state.createdAt, updatedAt: now,
-    }),
+    record("goals", `g:${state.goalId}`, goalProgressRecord(state, goalState, now)),
+    record("tasks", `t:${state.taskId}`, taskProgressRecord(state, taskState, now)),
     record(COLLECTION, ACTIVE_KEY, state),
   ];
 }
@@ -1650,6 +1755,55 @@ function advanceAfterTool(event) {
     return action("data.put", { collection: COLLECTION, key: ACTIVE_KEY, value: state });
   }
   switch (pending) {
+    case "goal-control-receipt-read": {
+      const control = pendingGoalControl;
+      const receiptRecord = result;
+      const receipt = receiptRecord?.value;
+      if (!control) throw new Error("用户任务控制回执检查上下文已丢失");
+      if (receipt) {
+        if (receipt.eventId !== control.eventId || receipt.type !== "goal.control" || receipt.command !== control.command) {
+          throw new Error("用户任务控制 ID 已被其他事件占用");
+        }
+        if (receipt.state === "completed") {
+          pendingGoalControl = null;
+          return { state: receipt.resultState || "completed", duplicate: true, eventId: control.eventId,
+            queuedCancelled: Number(receipt.queuedCancelled || 0), receipt };
+        }
+        if (!["prepared", "retryable-error"].includes(receipt.state)) throw new Error("用户任务控制回执状态无效");
+        control.receipt = receipt;
+        control.queuedCancelled = Number(receipt.queuedCancelled || 0);
+      }
+      return readGoalControlActive();
+    }
+    case "goal-control-active-read": {
+      const control = pendingGoalControl;
+      if (!control) throw new Error("用户任务控制上下文已丢失");
+      control.activeRecord = result;
+      return control.command === "cancel" ? readGoalControlQueue() : readGoalControlGoal();
+    }
+    case "goal-control-queue-read": {
+      const items = Array.isArray(result?.items) ? result.items : [];
+      return items.length ? saveGoalControlQueuePage(items) : readGoalControlGoal();
+    }
+    case "goal-control-queue-page-saved": return readGoalControlQueue();
+    case "goal-control-goal-read": {
+      if (!pendingGoalControl) throw new Error("用户任务控制上下文已丢失");
+      pendingGoalControl.goalRecord = result;
+      return readGoalControlTask();
+    }
+    case "goal-control-task-read": {
+      if (!pendingGoalControl) throw new Error("用户任务控制上下文已丢失");
+      pendingGoalControl.taskRecord = result;
+      return finishGoalControlTransition();
+    }
+    case "goal-control-final-saved": return continueAfterGoalControl();
+    case "goal-control-failure-saved": {
+      const control = pendingGoalControl;
+      pendingGoalControl = null;
+      controlNeedsQueueDrain = true;
+      return { state: "retryable-error", eventId: control?.eventId,
+        error: control?.receipt?.error || "用户任务控制未完成，可重试。" };
+    }
     case "create-goal":
       pending = "get-provider";
       return action("data.get", { collection: "screen-interaction", key: "provider" });
@@ -1844,13 +1998,25 @@ function advanceAfterTool(event) {
         return { state: state?.state || "idle", startup: true };
       }
       startupNeedsQueueDrain = false;
-      if (state.state === "paused") return { state: "paused", progress: state.progress || "任务已暂停" };
-      if (state.waiting?.userRequired) return { state: "waiting", progress: state.progress, userRequired: true };
-      state.state = "active";
-      state.activeSegmentStartedAt = null;
-      startActiveSegment();
-      pending = "load-provider";
-      return action("data.get", { collection: "screen-interaction", key: "provider" });
+      if (!state.goalPlan) {
+        pending = "load-active-goal-plan";
+        return action("data.get", { collection: "goals", key: `g:${state.goalId}` });
+      }
+      if (!state.taskPlan || !state.taskRecordKind) {
+        pending = "load-active-task-plan";
+        return action("data.get", { collection: "tasks", key: `t:${state.taskId}` });
+      }
+      return continueAfterActiveLoad();
+    }
+    case "load-active-goal-plan": {
+      state.goalPlan = goalPlanFromRecord(result?.value);
+      pending = "load-active-task-plan";
+      return action("data.get", { collection: "tasks", key: `t:${state.taskId}` });
+    }
+    case "load-active-task-plan": {
+      state.taskPlan = taskPlanFromRecord(result?.value);
+      state.taskRecordKind = typeof result?.value?.kind === "string" ? result.value.kind : "screen-work";
+      return continueAfterActiveLoad();
     }
     case "load-provider": {
       if (!providerValid(result?.value)) throw new Error("后台任务无法读取有效模型配置");
@@ -2080,6 +2246,7 @@ globalThis.onHaminnEvent = event => {
     if (event?.type === "notification.posted") return acceptNotificationEvent(event);
     if (event?.type === "timer.fired") return acceptTimerEvent(event);
     if (event?.type === "event-task.control") return beginEventTaskControl(event);
+    if (event?.type === "goal.control") return beginGoalControl(event);
     if (event?.type === "event.acknowledged") {
       if (state?.state !== "event-start-pending" || state.pendingEventStartFor !== event.eventId) {
         return { state: state?.state || "idle", ignored: true };
@@ -2147,7 +2314,8 @@ globalThis.onHaminnEvent = event => {
         return action("data.put", { collection: COLLECTION, key: ACTIVE_KEY, value: state });
       }
       failedBridgeMethod = activeCallMethod;
-      const failedCriticalRead = failedBridgeMethod === "data.get" && CRITICAL_STATE_READ_STAGES.has(pending);
+      const failedCriticalRead = (failedBridgeMethod === "data.get" || failedBridgeMethod === "data.scan") &&
+        CRITICAL_STATE_READ_STAGES.has(pending);
       if (!event.ok && (failedBridgeMethod === "data.put" || failedBridgeMethod === "data.batch" || failedCriticalRead)) {
         const bridgeError = Object.assign(new Error(event.error?.message || "Haminn 数据存储调用失败"), {
           code: event.error?.code, retryable: event.error?.retryable,
@@ -2162,6 +2330,9 @@ globalThis.onHaminnEvent = event => {
     return { state: "ignored" };
   } catch (error) {
     if (error?.category === "worker-state-persistence") throw error;
+    if (pending.startsWith("goal-control-") && pending !== "goal-control-failure-saved" && pendingGoalControl) {
+      return saveGoalControlFailure(error);
+    }
     if (pending.startsWith("event-task-control-") && pending !== "event-task-control-failure-saved" && pendingEventTaskControl) {
       return saveEventTaskControlFailure(error);
     }

@@ -161,6 +161,95 @@ test("background goal persists progress and completes across screenshot cycles",
   assert.ok(learning?.contextManifest?.selected.learningTraceRefs.length > 0);
 });
 
+test("active Goal and Task plans hydrate on Worker restart and survive later progress writes", () => {
+  const now = Date.now();
+  const goalId = "goal-plan-preservation";
+  const taskId = "task-plan-preservation";
+  const records = new Map([
+    ["agent-runtime:active-goal", { value: {
+      goalId, taskId, runId: "run-plan-preservation", taskType: "one-shot", taskKind: "OST",
+      intent: "完成合成任务", state: "running", step: 2, revision: 3, createdAt: now - 1000,
+      goalAttemptStartedAt: now - 1000, goalDeadlineAt: now + 10 * 60_000,
+      progress: "从已保存进度继续", activeElapsedMs: 0, activeSegmentStartedAt: null,
+      actionLoop: { index: 1, status: "running", budgetMinutes: 15, estimatedMinutes: 5, elapsedMs: 0,
+        segmentStartedAt: null }, trace: [],
+    }, revision: "1" }],
+    [`goals:g:${goalId}`, { value: {
+      schemaVersion: 1, goalId, intent: "完成合成任务", scope: { packageName: "synthetic.app" },
+      triggers: [{ kind: "manual", source: "saved-plan" }], completion: "模型确认合成目标完成",
+      priority: 7, state: "active", revision: 3, acceptedBoundary: "after-creation", createdAt: now - 1000,
+    }, revision: "3" }],
+    [`tasks:t:${taskId}`, { value: {
+      schemaVersion: 1, taskId, goalId, runId: "run-plan-preservation", kind: "screen-work",
+      objective: "完成合成任务", state: "running", revision: 3,
+      dependencies: ["task-prerequisite"], objectKey: "synthetic:object-1",
+      progress: "从已保存进度继续", waiting: null, resultRefs: [], createdAt: now - 1000,
+    }, revision: "3" }],
+  ]);
+
+  function tool(method, params) {
+    if (method === "data.get") return params.key === "provider"
+      ? { value: { baseUrl: "https://model.example", apiKey: "x".repeat(24), model: "vision-model" } }
+      : records.get(`${params.collection}:${params.key}`) || null;
+    if (method === "data.scan") return { items: [] };
+    if (method === "data.put") {
+      records.set(`${params.collection}:${params.key}`, { value: params.value, revision: "4" });
+      return { revision: "4" };
+    }
+    if (method === "data.batch") {
+      for (const item of params.operations) {
+        const key = `${item.collection}:${item.key}`;
+        if (item.op === "delete") records.delete(key);
+        else records.set(key, { value: item.value, revision: "4" });
+      }
+      return { results: [] };
+    }
+    if (method === "interaction.capture") return { mime: "image/jpeg", width: 1, height: 1, dataBase64: "c3ludGhldGljLWZyYW1l" };
+    if (method === "network.request") {
+      return modelCall(params, () => ({ state: "done", evidence: "合成目标已完成并核对当前画面" }), {
+        learning: { saveExperience: false, saveTool: false },
+      });
+    }
+    throw new Error(`Unexpected tool: ${method}`);
+  }
+
+  let output = globalThis.onHaminnEvent({ type: "start" });
+  for (let turn = 0; output?.actions?.length && turn < 100; turn += 1) {
+    const call = output.actions[0];
+    output = globalThis.onHaminnEvent({ type: "tool.result", callId: call.callId, ok: true, result: tool(call.method, call.params) });
+  }
+
+  assert.equal(output.state, "done", JSON.stringify(output));
+  const savedGoal = records.get(`goals:g:${goalId}`).value;
+  assert.deepEqual(savedGoal.scope, { packageName: "synthetic.app" });
+  assert.deepEqual(savedGoal.triggers, [{ kind: "manual", source: "saved-plan" }]);
+  assert.equal(savedGoal.completion, "模型确认合成目标完成");
+  assert.equal(savedGoal.priority, 7);
+  assert.equal(savedGoal.taskKind, "OST");
+  const savedTask = records.get(`tasks:t:${taskId}`).value;
+  assert.deepEqual(savedTask.dependencies, ["task-prerequisite"]);
+  assert.equal(savedTask.objectKey, "synthetic:object-1");
+});
+
+test("Worker does not resume an old active Goal when its saved plan cannot be read", () => {
+  const active = { goalId: "goal-plan-read-failure", taskId: "task-plan-read-failure",
+    intent: "完成合成任务", state: "running", revision: 2, createdAt: Date.now(), trace: [] };
+  let output = globalThis.onHaminnEvent({ type: "start" });
+  let call = output.actions[0];
+  assert.equal(call.method, "data.get");
+  output = globalThis.onHaminnEvent({ type: "tool.result", callId: call.callId, ok: true,
+    result: { value: active, revision: "1" } });
+  call = output.actions[0];
+  assert.equal(call.params.collection, "goals");
+  assert.throws(() => globalThis.onHaminnEvent({ type: "tool.result", callId: call.callId, ok: false,
+    error: { code: "E_STORAGE", retryable: true, message: "synthetic Goal read outage" } }), error => {
+    assert.equal(error.category, "worker-state-persistence");
+    assert.equal(error.code, "E_STORAGE");
+    assert.match(error.message, /load-active-goal-plan/);
+    return true;
+  });
+});
+
 test("LLM requests Persona and object Memory only when relevant and HO restores context after restart", () => {
   const records = new Map();
   const goalId = "goal-object-memory-context";
@@ -2260,4 +2349,75 @@ test("all Worker model purposes can consume a response stored as a Haminn file",
   } finally {
     Date.now = originalNow;
   }
+});
+
+test("priority user cancel is handled before Worker startup and clears every queued OST", async () => {
+  await import(`./worker.mjs?goal-control=${Date.now()}`);
+  const records = new Map();
+  records.set("agent-runtime:active-goal", { revision: 8, value: {
+    goalId: "g-control", taskId: "t-control", intent: "完成合成目标", state: "active",
+    revision: 4, step: 3, journalSequence: 0, trace: [], waiting: null,
+  } });
+  records.set("goals:g:g-control", { revision: 12, value: { goalId: "g-control", state: "active", revision: 4 } });
+  records.set("tasks:t:t-control", { revision: 20, value: { taskId: "t-control", state: "running", revision: 4 } });
+  for (let index = 0; index < 105; index += 1) {
+    records.set(`inbox:q:${String(index).padStart(3, "0")}`, { revision: 1,
+      value: { type: "goal.submit", intent: `synthetic ${index}`, state: "queued" } });
+  }
+  function tool(method, params) {
+    if (method === "data.get") return records.get(`${params.collection}:${params.key}`) || null;
+    if (method === "data.scan") return { items: [...records.entries()]
+      .filter(([key]) => key.startsWith(`${params.collection}:${params.prefix}`))
+      .sort(([a], [b]) => a.localeCompare(b)).slice(0, params.limit)
+      .map(([key, entry]) => ({ key: key.slice(params.collection.length + 1), ...entry })) };
+    if (method === "data.put" || method === "data.batch") {
+      const operations = method === "data.put" ? [{ op: "put", ...params }] : params.operations;
+      for (const operation of operations) {
+        const key = `${operation.collection}:${operation.key}`;
+        const current = records.get(key);
+        if ((operation.expectedRevision === "absent" && current) ||
+            (operation.expectedRevision !== undefined && operation.expectedRevision !== "absent" &&
+              current?.revision !== operation.expectedRevision)) throw new Error(`revision conflict: ${key}`);
+      }
+      for (const operation of operations) {
+        const key = `${operation.collection}:${operation.key}`;
+        const current = records.get(key);
+        if (operation.op === "delete") records.delete(key);
+        else records.set(key, { value: operation.value, revision: Number(current?.revision || 0) + 1 });
+      }
+      return { results: [] };
+    }
+    throw new Error(`Unexpected tool: ${method}`);
+  }
+  function deliver(event) {
+    let output = globalThis.onHaminnEvent(event);
+    for (let turn = 0; output?.actions?.length && turn < 30; turn += 1) {
+      const call = output.actions[0];
+      output = globalThis.onHaminnEvent({ type: "tool.result", callId: call.callId,
+        ok: true, result: tool(call.method, call.params) });
+    }
+    return output;
+  }
+
+  const event = { type: "goal.control", eventId: "cancel-before-start", command: "cancel" };
+  let interrupted = globalThis.onHaminnEvent(event);
+  for (let turn = 0; interrupted?.actions?.length && turn < 3; turn += 1) {
+    const call = interrupted.actions[0];
+    interrupted = globalThis.onHaminnEvent({ type: "tool.result", callId: call.callId,
+      ok: true, result: tool(call.method, call.params) });
+  }
+  assert.equal(interrupted.actions[0].method, "data.batch", "the first queue page and its progress receipt should commit together");
+  tool(interrupted.actions[0].method, interrupted.actions[0].params);
+  assert.equal(records.get(`agent-runtime:${eventReceiptKey(event.eventId)}`)?.value?.queuedCancelled, 100);
+  assert.equal([...records.keys()].filter(key => key.startsWith("inbox:q:")).length, 5);
+  await import(`./worker.mjs?goal-control-restart=${Date.now()}`);
+  const cancelled = deliver(event);
+  assert.equal(cancelled.controlApplied, true, JSON.stringify(cancelled));
+  assert.equal(cancelled.queuedCancelled, 105);
+  assert.equal(records.get("agent-runtime:active-goal").value.state, "cancelled");
+  assert.equal([...records.keys()].filter(key => key.startsWith("inbox:q:")).length, 0);
+  const duplicate = deliver(event);
+  assert.equal(duplicate.duplicate, true);
+  assert.equal(duplicate.queuedCancelled, 105);
+  assert.equal(deliver({ type: "start" }).state, "cancelled");
 });

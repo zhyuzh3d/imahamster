@@ -25,18 +25,15 @@ function put(collection, key, value, expectedRevision) {
   return { op: "put", collection, key, value, expectedRevision };
 }
 
-export async function applyUserControl(data, { command, reply = "", now = Date.now() } = {}) {
+export function prepareUserControlTransition({ activeRecord, goalRecord, taskRecord,
+  command, reply = "", queuedCancelled = 0, now = Date.now(), random = Math.random } = {}) {
   const control = CONTROL[command];
   if (!control) throw new TypeError(`Unsupported user control: ${command}`);
-  const active = await data.get({ collection: ACTIVE_COLLECTION, key: ACTIVE_KEY });
-  const value = active?.value;
-  let queuedCancelled = 0;
-
-  if (command === "cancel") queuedCancelled = await clearQueuedGoals(data);
+  const value = activeRecord?.value;
   if (!value?.goalId || !value?.taskId || isTerminal(value.state) ||
       (command === "resume" && !["paused", "waiting", "failed"].includes(value.state)) ||
       (command === "pause" && value.state === "paused")) {
-    return { updated: false, queuedCancelled, intent: value?.intent || "" };
+    return { updated: false, queuedCancelled, intent: value?.intent || "", operations: [] };
   }
 
   const progress = command === "pause" ? "用户已暂停任务；继续时先重新观察屏幕并核对未完成操作。"
@@ -65,17 +62,15 @@ export async function applyUserControl(data, { command, reply = "", now = Date.n
     ...(retryAfterTimeLimit ? {
       goalAttemptStartedAt: now,
       goalDeadlineAt: now + 30 * 60_000,
-      runId: `${Number(now).toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+      runId: `${Number(now).toString(36)}-${random().toString(36).slice(2, 8)}`,
       attempt: Number(value.attempt || 1) + 1,
     } : {}),
   };
-  const operations = [put(ACTIVE_COLLECTION, ACTIVE_KEY, nextActive, active.revision)];
+  const operations = [put(ACTIVE_COLLECTION, ACTIVE_KEY, nextActive, activeRecord.revision)];
   const journal = makeJournalEntry(nextActive, sequence, event);
   operations.push(put("agent-events", journal.key, journal.value, "absent"));
-  const [goal, task] = await Promise.all([
-    data.get({ collection: "goals", key: `g:${value.goalId}` }),
-    data.get({ collection: "tasks", key: `t:${value.taskId}` }),
-  ]);
+  const goal = goalRecord;
+  const task = taskRecord;
   if (goal?.value) operations.push(put("goals", `g:${value.goalId}`, {
     ...goal.value,
     state: control.state,
@@ -91,21 +86,5 @@ export async function applyUserControl(data, { command, reply = "", now = Date.n
     revision: Number(task.value.revision || 0) + 1,
     updatedAt: now,
   }, task.revision));
-  await data.batch({ operations });
-  return { updated: true, queuedCancelled, intent };
-}
-
-export async function clearQueuedGoals(data) {
-  let afterKey;
-  let removed = 0;
-  while (true) {
-    const page = await data.scan({ collection: "inbox", prefix: "q:", limit: 100, afterKey });
-    const items = Array.isArray(page?.items) ? page.items : [];
-    if (!items.length) return removed;
-    await data.batch({ operations: items.map((item) => ({ op: "delete", collection: "inbox",
-      key: item.key, expectedRevision: item.revision })) });
-    removed += items.length;
-    if (items.length < 100) return removed;
-    afterKey = items[items.length - 1].key;
-  }
+  return { updated: true, queuedCancelled, intent, nextActive, operations };
 }
