@@ -25,7 +25,7 @@
 
 | 位置 | 已有实现 | 升级问题 |
 |---|---|---|
-| [agent/worker.mjs](../agent/worker.mjs) | 生产后台入口与 effect/result 状态机；串联 OST/EDT/AL、屏幕交互、CAE、学习与持久事件日志 | 仍是较大的生命周期协调器；进一步拆分必须围绕稳定 effect/result 合同，不能再增加第二套运行路径 |
+| [agent/worker.mjs](../agent/worker.mjs) | 生产后台入口与 effect/result 状态机；串联 OST/EDT/AL、屏幕交互、CAE、学习与持久事件日志 | 仍是较大的生命周期协调器；后置学习仍挂在已完成用户 OST 的 Worker 流程上，尚未形成独立低优先级系统 EDT/维护 OST；拆分必须围绕稳定 effect/result 合同，不能再增加第二套运行路径 |
 | [agent/ho/](../agent/ho/)、[agent/cae/](../agent/cae/)、[agent/me/](../agent/me/)、[agent/sm/](../agent/sm/)、[agent/te/](../agent/te/) | 生命周期、上下文组装、Memory/Persona、工具目录与检索的纯模块 | 有界关键词检索不是语义检索；真实场景中的提示质量、恢复策略与经验复用尚未验收 |
 | [agent/storage/](../agent/storage/) | 日志与状态批次适配；记录 `active-goal`、Goal、Task 和 EDT 记录的 Host revision；CAS 冲突后重读对应生命周期与持久事件 | 独立事件回执和其他可变集合仍未统一进入 revision ledger；还需覆盖多 Worker 回执竞态与长期运行 |
 | （§10.41 已删除）早期 `agent/model.mjs`、`agent/store.mjs` | Promise 式 Goal/Task 存储原型 | 仅有模拟测试曾引用；删除以避免与 Worker effect/result 主路径形成双轨 |
@@ -40,6 +40,7 @@
 3. **检索规模与语义仍有限**：ME、BP、TE 当前依赖有界扫描和轻量关键词重合；需要用实际任务验证现有简单排序够不够，再决定是否补轻量分页/索引，不预设外部向量服务。
 4. **恢复闭环需要场景证据**：模型能看到日志、失败信号和未决操作，并由 LLM 选择续做/换路；还要覆盖错误截图、错误操作、页面加载异常、重启和结果不确定时是否能继续，而非只看最终状态。
 5. **产品验收仍缺目标设备证据**：Node 测试和 Haminn 源码合同不能证明 QuickJS 对新增模块的实际加载、真机通知权限、真实微信界面识别/操作、模型复盘质量或完成后的经验复用。
+6. **学习维护生命周期尚未独立**：`learningStatus` 现在能随用户 OST 完成状态持久化并在 Worker 重启后续接，工作面板也能显示 pending/complete/skipped；但学习请求仍沿用同一活动记录执行，未实现独立的系统 EDT/outbox、低优先级维护 OST 及其公平调度，后续需按 §6.5 收敛完成。
 
 以上是源码结构与路径判断，不等同于每项都已在设备复现。升级测试应针对真实执行路径证明修复，而非为推测问题增加旁路补丁。
 
@@ -674,6 +675,12 @@ JS 测试适合纯状态与组装；QuickJS/Android 仪器测试负责真实模�
 - 复查成功 OST 的收尾顺序发现：LLM 的 `done` 结果先持久化，随后才写 `learningStatus=pending` 并请求学习模型。若 Worker 恰在这两步之间重启，`load-active` 会把终态直接返回，ME/SM/TE 学习整理永远不会启动；只在启动时把缺少状态的所有旧终态都当成待学习又会误触发历史目标，并影响已完成的后台队列恢复。
 - HO 现在在同一份 `decision-saved` 持久化状态中记录 `learningStatus=pending`。Worker 重启仅恢复这个明确标记的已完成 OST：先持久记录恢复轨迹、读取模型配置，再重建学习上下文并请求 LLM；不重开 OST、不恢复屏幕动作。成功或跳过的记录保持终态，不重复学习；缺少该新状态字段的旧终态不被追溯重放。
 - 新增 Worker 集成测试验证 pending 学习在重启后回到 LLM 学习请求、不产生截图/动作，并验证完成学习后重启不会重复调用。全量 `node --test` 150/150 通过；Worker/测试语法、`haminn.json` JSON 解析与 `git diff --check` 通过。版本先升至 `0.1.43` / code 44，再由活动 DEV watcher 同步；本次仍未取得目标设备的 ADB transport 或可见 ImHamster runtime，因此不构成手机/微信验收。
+
+### 10.50 工作面板显示成功后的学习整理状态（2026-10-11）
+
+- 检查界面日志后发现，后置学习错误已经记录在 Worker 状态与事件轨迹，但工作面板只显示 OST“已完成”，无法直接区分学习待恢复、成功保存或跳过失败；没有轨迹的终态记录也可能把待处理学习隐藏。
+- `deriveWorkerPanelState` 现在按持久 `learningStatus` 显示待完成、完成及保存条数、跳过及有界错误原因；待处理/失败学习会使终态面板保持可见。面板不改变 OST 状态、不代替 LLM 评估，也不会把旧终态状态显示到尚未持久化的新目标上。新增的启动恢复轨迹也有可读中文标签。
+- 状态模块测试覆盖 pending、skipped、complete 三种结果及面板可见性；全量 `node --test` 152/152 通过，`app.js`、状态模块语法检查与 `git diff --check` 通过。此项提升失败可见性，但没有把后置学习改造成 §6.5 的独立系统 EDT/维护 OST；真机界面仍待设备可见后验证。
 
 ## 11. 交付与完成判定
 

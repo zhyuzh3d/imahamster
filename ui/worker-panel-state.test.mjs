@@ -62,6 +62,32 @@ test("a completed OST exposes a separate retry control when background queue rec
   assert.equal(state.resumeEnabled, true);
 });
 
+test("completed OST exposes pending and failed learning maintenance status", () => {
+  const pending = deriveWorkerPanelState({
+    activeRecord: { value: { state: "done", learningStatus: "pending", trace: [] } },
+    serviceState: "running",
+  });
+  assert.equal(pending.visible, true);
+  assert.equal(pending.learningStatus, "成功后经验整理待完成");
+
+  const failed = deriveWorkerPanelState({
+    activeRecord: { value: { state: "done", learningStatus: "skipped", learningError: "模型服务超时", trace: [] } },
+    serviceState: "running",
+  });
+  assert.equal(failed.visible, true);
+  assert.equal(failed.learningStatus, "成功后经验整理未完成：模型服务超时");
+});
+
+test("completed OST summarizes successful learning without changing its task state", () => {
+  const state = deriveWorkerPanelState({
+    activeRecord: { value: { state: "done", learningStatus: "complete", learningSaved: 3, trace: [] } },
+    serviceState: "running",
+  });
+  assert.equal(state.visible, true);
+  assert.equal(state.activeCanControl, false);
+  assert.equal(state.learningStatus, "成功后经验整理完成，保存 3 条");
+});
+
 test("decomposed OST progress identifies the current HO Task and completed units", () => {
   const state = deriveWorkerPanelState({
     activeRecord: { value: { state: "active", taskId: "t2", taskGraph: { tasks: [

@@ -794,7 +794,7 @@
     const { deriveWorkerPanelState } = await loadWorkerPanelStateModule();
     const panelState = deriveWorkerPanelState({ activeRecord, queuedCount, serviceState, lastResult, eventTasks });
     const { active, liveEventTasks, visible, interruptedHandoff, orphanedHandoff, persistedCurrentGoal,
-      queueRecoveryNeedsUser } = panelState;
+      queueRecoveryNeedsUser, learningStatus } = panelState;
     const displayActive = interruptedHandoff && !persistedCurrentGoal ? null : active;
     workerPanel.hidden = !visible;
     if (!visible) return;
@@ -817,6 +817,7 @@
       lines.push(`后台事件队列恢复${recovery.userRequired ? "需要重试" : "自动重试中"}：${String(recovery.error || "存储读取失败").slice(0, 180)}（${recovery.attempts || 0}/${recovery.maxAttempts || 8}）`);
     }
     if (displayActive?.intent) lines.push(displayActive.intent.slice(0, 180));
+    if (learningStatus) lines.push(learningStatus);
     if (panelState.taskGraphProgress) {
       const { completed, total, currentLabel } = panelState.taskGraphProgress;
       lines.push(`子任务 ${completed}/${total} 已完成 · ${currentLabel}`);
@@ -839,6 +840,7 @@
         "screenshot.received": "收到截图", "model.requested": "请求模型", "model.responded": "模型返回",
         "decision": "模型决策", "model.error": "模型处理错误", "bridge.dispatched": "派发操作", "bridge.result": "操作回执", "worker.error": "执行错误",
         "recovery.scheduled": "安排恢复", "action-loop.repetition": "重复动作", "loop.repetition": "重复动作", "screen.unchanged": "画面未变",
+        "learning.resume-after-worker-restart": "恢复成功后经验整理",
         "recovery.failure-recorded": "累计恢复故障",
         "action-loop.planning": "规划 AL", "loop.planning": "规划 AL", "action-loop.started": "AL 开始", "loop.started": "AL 开始", "action-loop.timeout": "AL 预算检查点", "loop.timeout": "AL 预算检查点", "action-loop.review": "LLM 复盘决定", "loop.review": "LLM 复盘决定",
         "goal.time-limit-exceeded": "目标超时停止", "goal.retry-attempt": "重新开始目标", "learning.review-complete": "经验整理完成", "learning.review-skipped": "跳过经验整理",
