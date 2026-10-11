@@ -28,6 +28,14 @@ test("background goal persists progress and completes across screenshot cycles",
   records.set("knowledge:experience:weather", { revision: "1", value: {
     type: "experience", state: "active", title: "天气预报", situation: "查询天气", approach: "打开天气应用", successEvidence: "天气已显示", createdAt: 30,
   } });
+  records.set("self-model:bp:reply-style", { revision: "1", value: {
+    type: "behavior-pattern", state: "active", scope: "global", title: "简洁友好回复",
+    condition: "回复微信朋友消息", guidance: "语气自然、简短、友好", evidence: "用户明确采用过这种回复方式", createdAt: 40,
+  } });
+  records.set("self-model:bp:weather-style", { revision: "1", value: {
+    type: "behavior-pattern", state: "active", scope: "global", title: "天气摘要格式",
+    condition: "查询天气预报", guidance: "优先给出本地天气", evidence: "用户明确采用过这种格式", createdAt: 50,
+  } });
 
   function tool(method, params) {
     if (method === "data.batch") {
@@ -92,6 +100,8 @@ test("background goal persists progress and completes across screenshot cycles",
   assert.equal(captures, 1);
   assert.match(modelPrompts.at(-1), /微信消息上下文回复/);
   assert.doesNotMatch(modelPrompts.at(-1), /天气预报/);
+  assert.match(modelPrompts.at(-1), /简洁友好回复/);
+  assert.doesNotMatch(modelPrompts.at(-1), /天气摘要格式/);
   assert.equal(records.get(`agent-runtime:${eventReceiptKey(submission.eventId)}`).value.state, "accepted");
   const duplicateSubmission = deliver(submission);
   assert.equal(duplicateSubmission.duplicate, true);
@@ -1175,6 +1185,8 @@ test("LLM can start a new action loop after timeout and choose a reusable experi
       learning: {
         saveExperience: true,
         experience: { title: "合成页面直接入口", situation: "合成测试页操作", approach: "先观察当前页面，再使用可见入口", successEvidence: "最终页面显示完成状态", toolRefs: ["interaction.capture", "interaction.tap"] },
+        savePattern: true,
+        pattern: { title: "简洁回复", condition: "给朋友回消息", guidance: "表达自然，不必复述对方原文", evidence: "成功任务中用户采用此表达方式" },
         saveTool: true,
         tool: { name: "页面入口复核", description: "观察页面后选择已注册的交互工具", toolRefs: ["interaction.tap", "shell.exec"] },
       },
@@ -1192,6 +1204,12 @@ test("LLM can start a new action loop after timeout and choose a reusable experi
   assert.equal(saved.actionLoop.index, 3);
   assert.equal(saved.trace.find(event => event.phase === "action-loop.review")?.choice, "new-action-loop");
   assert.equal(records.get(`knowledge:experience:${active.goalId}`).value.type, "experience");
+  assert.deepEqual(records.get(`self-model:bp:${active.goalId}`).value, {
+    schemaVersion: 1, type: "behavior-pattern", state: "active", scope: "global",
+    title: "简洁回复", condition: "给朋友回消息", guidance: "表达自然，不必复述对方原文",
+    evidence: "成功任务中用户采用此表达方式", sourceGoalId: active.goalId,
+    createdAt: records.get(`self-model:bp:${active.goalId}`).value.createdAt,
+  });
   assert.deepEqual(records.get(`knowledge:tool-candidate:${active.goalId}`).value.toolRefs, ["interaction.tap"]);
 });
 

@@ -12,6 +12,7 @@ test("CAE assembles a bounded action context without mutating the OST", () => {
     actionLoopHistory: Array.from({ length: 8 }, (_, index) => ({ index, status: "reviewed", strategy: `路线 ${index}` })),
     trace: Array.from({ length: 24 }, (_, index) => ({ step: index, phase: `phase-${index}`, message: "异常".repeat(100) })),
     experiences: Array.from({ length: 7 }, (_, index) => ({ title: `经验 ${index}`, situation: "收消息", approach: "观察", successEvidence: "气泡可见" })),
+    behaviorPatterns: Array.from({ length: 7 }, (_, index) => ({ title: `模式 ${index}`, condition: "回复消息", guidance: "简洁", evidence: "用户明确选择" })),
     pendingOperationId: "op-1",
     pendingOperation: { operationId: "op-1", status: "unknown", intendedContent: "你好".repeat(5000) },
     inputRecovery: { stage: "focus-required", code: "E_CONFLICT" },
@@ -26,6 +27,8 @@ test("CAE assembles a bounded action context without mutating the OST", () => {
   assert.match(context, /待核实操作/);
   assert.match(context, /经验 0/);
   assert.doesNotMatch(context, /经验 5/);
+  assert.match(context, /模式 0/);
+  assert.doesNotMatch(context, /模式 5/);
   assert.doesNotMatch(context, /phase-0\"/);
   assert.match(context, /phase-4\"/);
   assert.match(context, /phase-23\"/);

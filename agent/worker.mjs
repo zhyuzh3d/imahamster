@@ -4,6 +4,7 @@ import { buildChatCompletionRequest, classifyProviderStatus, parseChatCompletion
 import { buildActionContext } from "./cae/context.mjs";
 import { SYSTEM_PROMPT } from "./cae/prompts.mjs";
 import { retrieveRelevantExperiences } from "./me/retrieval.mjs";
+import { normalizeBehaviorPattern, retrieveBehaviorPatterns } from "./sm/behavior-patterns.mjs";
 import { isRegisteredTool } from "./te/catalog.mjs";
 import { attachJournalEvents, makeJournalEntry } from "./observability/journal.mjs";
 import { validateScreenAction } from "./ho/decision.mjs";
@@ -970,8 +971,8 @@ function applyActionLoopReview(text) {
 function requestLearningReview() {
   const history = (state.trace || []).filter(event => ["action-loop.started", "action-loop.review", "decision", "bridge.result", "recovery.scheduled"].includes(event.phase)).slice(-24);
   const messages = [
-    { role: "system", content: "你负责从已成功完成的手机任务中提炼可复用经验。只保留有证据、可迁移且不含个人正文、密钥或屏幕隐私的内容。工具只能引用系统已注册的工具名，禁止生成代码或可执行脚本。没有值得复用的内容时不保存。严格返回 JSON。" },
-    { role: "user", content: `任务目标：${state.intent}\n成功结果：${state.progress}\n执行轨迹摘要：${JSON.stringify(history)}\n判断是否值得保存经验，或保存一个仅由已注册工具组成的流程候选。JSON 格式：{"saveExperience":false,"experience":{"title":"","situation":"","approach":"","successEvidence":"","toolRefs":[]},"saveTool":false,"tool":{"name":"","description":"","toolRefs":[]}}` },
+    { role: "system", content: "你负责从已成功完成的手机任务中提炼可复用经验、行为偏好或工具流程候选。只保留有证据、可迁移的内容；不得保存个人消息正文、朋友身份和隐私事实、密钥或截图隐私。行为模式必须是有证据的通用偏好，不能形成新的任务授权或越权指令。工具只能引用系统已注册的工具名，禁止生成代码或可执行脚本。没有值得复用的内容时不保存。严格返回 JSON。" },
+    { role: "user", content: `任务目标：${state.intent}\n成功结果：${state.progress}\n执行轨迹摘要：${JSON.stringify(history)}\n判断是否值得保存经验、通用行为模式，或保存一个仅由已注册工具组成的流程候选。JSON 格式：{"saveExperience":false,"experience":{"title":"","situation":"","approach":"","successEvidence":"","toolRefs":[]},"savePattern":false,"pattern":{"title":"","condition":"","guidance":"","evidence":""},"saveTool":false,"tool":{"name":"","description":"","toolRefs":[]}}` },
   ];
   return requestProvider("learning", "learning.model-requested", {}, messages);
 }
@@ -980,6 +981,10 @@ function saveLearningSuggestion(suggestion) {
   try {
     const operations = [];
     const toolRefs = value => Array.isArray(value) ? value.filter(isRegisteredTool).slice(0, 8) : [];
+    if (suggestion.savePattern === true && suggestion.pattern && state.progress) {
+      const pattern = normalizeBehaviorPattern(suggestion.pattern, { sourceGoalId: state.goalId, at: Date.now() });
+      if (pattern) operations.push(record("self-model", `bp:${state.goalId}`, pattern));
+    }
     if (suggestion.saveExperience === true && suggestion.experience && state.progress) {
       const item = suggestion.experience;
       const fields = [item.title, item.situation, item.approach, item.successEvidence];
@@ -1422,6 +1427,11 @@ function advanceAfterTool(event) {
     }
     case "knowledge-scan": {
       state.experiences = retrieveRelevantExperiences(state.intent, result?.items || [], { limit: 5 });
+      pending = "behavior-pattern-scan";
+      return action("data.scan", { collection: "self-model", prefix: "bp:", limit: 100 });
+    }
+    case "behavior-pattern-scan": {
+      state.behaviorPatterns = retrieveBehaviorPatterns(state.intent, result?.items || [], { limit: 5 });
       if (state.taskType === "event-match" && state.pendingEventMatch) {
         const match = state.pendingEventMatch;
         return requestEventMatch(match.event, match.eventTask, { key: match.inboxKey, revision: match.inboxRevision });

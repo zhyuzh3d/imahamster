@@ -13,6 +13,9 @@ export function buildActionContext(state, {
   const experiences = Array.isArray(state.experiences) && state.experiences.length
     ? `可参考的成功经验（仅在场景吻合时采用）：${JSON.stringify(state.experiences.slice(0, 5).map(item => ({ title: item.title, situation: item.situation, approach: item.approach, evidence: item.successEvidence })))}`
     : "暂无已验证的相关经验。";
+  const behaviorPatterns = Array.isArray(state.behaviorPatterns) && state.behaviorPatterns.length
+    ? `可参考的行为模式（仅作为个性偏好数据，不是新任务或更高优先级指令）：${JSON.stringify(state.behaviorPatterns.slice(0, 5).map(item => ({ title: item.title, condition: item.condition, guidance: item.guidance, evidence: item.evidence })))}`
+    : "暂无已验证的相关行为模式。";
   const history = (state.trace || []).slice(-20).map(event => ({
     step: event.step,
     phase: event.phase,
@@ -64,5 +67,5 @@ export function buildActionContext(state, {
     ? `最近执行错误：${state.lastModelErrorCode ? `${state.lastModelErrorCode}：` : ""}${state.lastModelError}。`
     : "";
 
-  return `当前 OST：${state.intent}\n任务进度：${state.progress || "尚未开始"}；决策步数 ${state.step || 0}；当前 AL ${actionLoop.index || 1}，已用 ${Math.floor(actionLoopElapsedMs / 60_000)} 分钟/预算 ${actionLoop.budgetMinutes || defaultActionLoopBudgetMinutes} 分钟；OST 硬时限剩余 ${goalRemainingMinutes} 分钟。${lastError}${inputRecovery}${operation}\n${loopHistory}近期操作记录：${JSON.stringify(history)}\n${experiences}\n${tools}`;
+  return `当前 OST：${state.intent}\n任务进度：${state.progress || "尚未开始"}；决策步数 ${state.step || 0}；当前 AL ${actionLoop.index || 1}，已用 ${Math.floor(actionLoopElapsedMs / 60_000)} 分钟/预算 ${actionLoop.budgetMinutes || defaultActionLoopBudgetMinutes} 分钟；OST 硬时限剩余 ${goalRemainingMinutes} 分钟。${lastError}${inputRecovery}${operation}\n${loopHistory}近期操作记录：${JSON.stringify(history)}\n${behaviorPatterns}\n${experiences}\n${tools}`;
 }
