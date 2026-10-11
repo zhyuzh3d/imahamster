@@ -485,6 +485,66 @@ test("background goal persists progress and completes across screenshot cycles",
   assert.ok(learning?.contextManifest?.selected.learningTraceRefs.length > 0);
 });
 
+test("a Worker restart resumes unfinished post-success learning without reopening the OST", () => {
+  const records = new Map();
+  const goalId = "goal-learning-restart";
+  const active = {
+    goalId, taskId: "task-learning-restart", runId: "run-learning-restart",
+    intent: "在合成界面确认结果", taskType: "one-shot", taskKind: "OST", state: "done",
+    step: 3, revision: 4, progress: "LLM 已根据最终画面判断完成", learningStatus: "pending",
+    trace: [], journalSequence: 0,
+  };
+  records.set("agent-runtime:active-goal", { value: active, revision: "active-r1" });
+  const provider = { baseUrl: "https://model.example", apiKey: "x".repeat(24), model: "vision-model" };
+  let nextRevision = 1;
+  let output = globalThis.onHaminnEvent({ type: "start" });
+
+  for (let turn = 0; output?.actions?.length && turn < 20; turn += 1) {
+    const call = output.actions[0];
+    if (call.method === "network.request") {
+      const body = JSON.parse(call.params.bodyText);
+      const prompt = body.messages.map(message => typeof message.content === "string"
+        ? message.content : message.content.map(part => part.text || "").join(" ")).join("\n");
+      assert.match(prompt, /判断是否值得保存经验/);
+      assert.match(prompt, /在合成界面确认结果/);
+      assert.match(prompt, /LLM 已根据最终画面判断完成/);
+      assert.equal(call.params.timeoutMs <= 55_000, true);
+      output = null;
+      break;
+    }
+    let result;
+    if (call.method === "data.get") {
+      result = call.params.key === "provider" ? { value: provider }
+        : records.get(`${call.params.collection}:${call.params.key}`) || null;
+    } else if (call.method === "data.put") {
+      const revision = `learning-r${nextRevision++}`;
+      records.set(`${call.params.collection}:${call.params.key}`, {
+        value: structuredClone(call.params.value), revision,
+      });
+      result = { revision };
+    } else if (call.method === "data.batch") {
+      result = persistMockBatch(records, call.params);
+    } else {
+      assert.fail(`Unexpected recovery effect: ${call.method}`);
+    }
+    output = globalThis.onHaminnEvent({ type: "tool.result", callId: call.callId, ok: true, result });
+  }
+
+  assert.equal(output, null, "startup should reach the learning request without a screen action");
+  assert.equal(records.get("agent-runtime:active-goal").value.state, "done",
+    "resuming learning must not reopen or reclassify the completed OST");
+  assert.equal(records.get("agent-runtime:active-goal").value.learningStatus, "pending");
+
+  const completed = records.get("agent-runtime:active-goal");
+  completed.value.learningStatus = "complete";
+  output = globalThis.onHaminnEvent({ type: "start" });
+  output = globalThis.onHaminnEvent({ type: "tool.result", callId: output.actions[0].callId,
+    ok: true, result: completed });
+  assert.equal(output.state, "done");
+  assert.equal(output.startup, true);
+  assert.equal(output.actions, undefined, "completed learning must not be repeated after restart");
+});
+
 test("active Goal and Task plans hydrate on Worker restart and survive later progress writes", () => {
   const now = Date.now();
   const goalId = "goal-plan-preservation";

@@ -5,5 +5,5 @@
   "entry": "index.html",
   "routing": "hash",
   "background": { "entry": "agent/worker.mjs" },
-  "version": { "code": 43, "name": "0.1.42" }
+  "version": { "code": 44, "name": "0.1.43" }
 }

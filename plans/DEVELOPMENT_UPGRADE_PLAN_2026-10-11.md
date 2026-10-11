@@ -669,6 +669,12 @@ JS 测试适合纯状态与组装；QuickJS/Android 仪器测试负责真实模�
 - 模块测试覆盖有效键筛选、缺失/已存在回执 revision、冲突后重新读取和 malformed Host 结果。Worker 合成测试覆盖 OST 回执的 absent 条件，以及另一 Worker 已更新回执并删除 inbox 后，恢复路径保留其最终结果、不二次处理。全量 `node --test` 149/149 通过，Worker/revision 模块语法检查及 `git diff --check` 通过。
 - DEV watcher 接收并提交 `0.1.42` / code 43，服务 revision 1382，源码状态 `dirty`；当前 UI 运行态为 `not-visible`、没有页面渲染确认。通过服务尝试打开目标 happ 返回“Haminn has no foreground activity”。本轮 USB 复核确认 macOS IOUSB 树已识别 CMA-AN00（AKGR9K1C26013127）；重启本机 ADB 后仍只枚举 `emulator-5554`，没有建立该手机的 ADB transport。因此本节无 ImHamster 手机运行或微信行为证据；之前记录的“USB 未枚举”按当时证据记录保留，不把它当作当前状态。
 
+### 10.49 Worker 重启后续接成功任务的学习整理（2026-10-11）
+
+- 复查成功 OST 的收尾顺序发现：LLM 的 `done` 结果先持久化，随后才写 `learningStatus=pending` 并请求学习模型。若 Worker 恰在这两步之间重启，`load-active` 会把终态直接返回，ME/SM/TE 学习整理永远不会启动；只在启动时把缺少状态的所有旧终态都当成待学习又会误触发历史目标，并影响已完成的后台队列恢复。
+- HO 现在在同一份 `decision-saved` 持久化状态中记录 `learningStatus=pending`。Worker 重启仅恢复这个明确标记的已完成 OST：先持久记录恢复轨迹、读取模型配置，再重建学习上下文并请求 LLM；不重开 OST、不恢复屏幕动作。成功或跳过的记录保持终态，不重复学习；缺少该新状态字段的旧终态不被追溯重放。
+- 新增 Worker 集成测试验证 pending 学习在重启后回到 LLM 学习请求、不产生截图/动作，并验证完成学习后重启不会重复调用。全量 `node --test` 150/150 通过；Worker/测试语法、`haminn.json` JSON 解析与 `git diff --check` 通过。版本先升至 `0.1.43` / code 44，再由活动 DEV watcher 同步；本次仍未取得目标设备的 ADB transport 或可见 ImHamster runtime，因此不构成手机/微信验收。
+
 ## 11. 交付与完成判定
 
 ImHamster 与 Haminn 独立提交、验证和推送；每次提交前核对各自 Git 根与 origin，保留无关工作区改动。宿主新增合同需同步 SDK/能力文档/实际实现，消费者只接入确实支持的能力。

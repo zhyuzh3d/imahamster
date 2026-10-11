@@ -1879,6 +1879,7 @@ function storeDecision(decision) {
     state.waiting = { reason: decision.evidence, question: decision.question || null,
       userRequired: decision.state === "ask", automatic: decision.state === "wait", since: Date.now() };
   } else if (decision.state === "done") {
+    if (state.learningStatus !== "complete" && state.learningStatus !== "skipped") state.learningStatus = "pending";
     finishActiveSegment();
     if (state.actionLoop) finishActionLoop(state, "completed");
     state.state = "done";
@@ -2682,6 +2683,11 @@ function advanceAfterTool(event) {
       }
       if (state && !state.actionLoop && state.loop) state.actionLoop = state.loop;
       if (state) delete state.loop;
+      if (state?.state === "done" && state.learningStatus === "pending") {
+        startupNeedsQueueDrain = false;
+        appendTrace("learning.resume-after-worker-restart", {});
+        return persist("learning-resume-started-saved");
+      }
       if (state?.postTaskQueueRecovery?.userRequired) {
         const previousAttempts = Number(state.postTaskQueueRecovery.attempts || 0);
         state.postTaskQueueRecovery = { ...state.postTaskQueueRecovery,
@@ -2857,6 +2863,21 @@ function advanceAfterTool(event) {
     case "loop-review-saved": return beginObserve();
     case "loop-next-saved": return beginActionLoopPlanning(state.actionLoop.planReason === "timeout-review-restart" ? "timeout-restart" : "timeout-new-loop");
     case "learning-request-saved": return requestLearningReview();
+    case "learning-resume-started-saved":
+      pending = "learning-resume-provider";
+      return action("data.get", { collection: "screen-interaction", key: "provider" });
+    case "learning-resume-provider": {
+      if (!providerValid(result?.value)) {
+        state.learningStatus = "skipped";
+        state.learningError = "后台任务无法读取有效模型配置";
+        appendTrace("learning.review-skipped", { reason: state.learningError, resumed: true });
+        pending = "learning-failed-saved";
+        return action("data.put", { collection: COLLECTION, key: ACTIVE_KEY, value: state });
+      }
+      provider = result.value;
+      appendTrace("model.ready", { model: provider.model, resumed: true, purpose: "learning" });
+      return requestLearningReview();
+    }
     case "learning-saved": {
       pending = "completed-queue-read";
       return action("data.scan", { collection: "inbox", prefix: "q:", limit: 1 });
