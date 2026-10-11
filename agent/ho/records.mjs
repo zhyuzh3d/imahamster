@@ -34,7 +34,7 @@ export function goalProgressRecord(state, goalState, now) {
 export function taskProgressRecord(state, taskState, now) {
   return {
     schemaVersion: 1, taskId: state.taskId, goalId: state.goalId, runId: state.runId,
-    revision: state.revision, kind: state.taskRecordKind || "screen-work", objective: state.intent, state: taskState,
+    revision: state.revision, kind: state.taskRecordKind || "screen-work", objective: state.taskObjective || state.intent, state: taskState,
     ...(state.taskPlan || taskPlanFromRecord(null)),
     ...(state.parentEventTaskId ? { parentEventTaskId: state.parentEventTaskId } : {}),
     ...(state.sourceEventId ? { sourceEventId: state.sourceEventId } : {}),

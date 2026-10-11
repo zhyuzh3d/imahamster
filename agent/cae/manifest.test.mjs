@@ -43,3 +43,22 @@ test("CAE manifest records selected versions, bounded source refs, observation, 
 test("CAE rejects missing state when producing a context manifest", () => {
   assert.throws(() => buildContextManifest(null), /有效的 OST 状态/);
 });
+
+test("CAE manifest cites the scheduled Task graph without copying private task objectives", () => {
+  const state = {
+    goalId: "ost-task-graph", taskId: "task-reply", taskReviewMode: false,
+    taskGraph: { coordinatorTaskId: "task-coordinator", tasks: [
+      { taskId: "task-read", planIndex: 0, state: "done", revision: 3, objective: "PRIVATE first objective", dependencies: [] },
+      { taskId: "task-reply", planIndex: 1, state: "running", revision: 2, objective: "PRIVATE second objective", dependencies: ["task-read"] },
+    ] },
+  };
+  const manifest = buildContextManifest(state, { purpose: "action", context: "task-specific action context" });
+  assert.deepEqual(manifest.selected.taskGraph, {
+    coordinatorTaskRef: "task:task-coordinator", currentTaskRef: "task:task-reply", review: false,
+    tasks: [
+      { ref: "task:task-read", revision: 3, state: "done", dependsOn: [] },
+      { ref: "task:task-reply", revision: 2, state: "running", dependsOn: [1] },
+    ],
+  });
+  assert.doesNotMatch(JSON.stringify(manifest), /PRIVATE first objective|PRIVATE second objective/);
+});

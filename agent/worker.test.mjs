@@ -250,6 +250,115 @@ test("Worker does not resume an old active Goal when its saved plan cannot be re
   });
 });
 
+test("LLM-decomposed Tasks persist, run by dependency order, then return to LLM for whole-OST judgment", () => {
+  const records = new Map();
+  const actionPrompts = [];
+  const scheduledCalls = [];
+  let childOneDone = 0;
+  let childTwoDone = 0;
+  let reviewTurns = 0;
+  let captures = 0;
+  const provider = { baseUrl: "https://model.example", apiKey: "x".repeat(24), model: "vision-model" };
+
+  function tool(method, params) {
+    if (method === "data.get") return params.key === "provider" ? { value: provider }
+      : records.get(`${params.collection}:${params.key}`) || null;
+    if (method === "data.scan") return { items: [...records.entries()]
+      .filter(([key]) => key.startsWith(`${params.collection}:${params.prefix}`))
+      .sort(([a], [b]) => a.localeCompare(b)).slice(0, params.limit)
+      .map(([key, entry]) => ({ key: key.slice(params.collection.length + 1), ...entry })) };
+    if (method === "data.put" || method === "data.batch") {
+      const operations = method === "data.put" ? [{ op: "put", ...params }] : params.operations;
+      for (const operation of operations) {
+        const key = `${operation.collection}:${operation.key}`;
+        const current = records.get(key);
+        if (operation.expectedRevision === "absent" && current) throw new Error(`revision conflict: ${key}`);
+        if (operation.expectedRevision !== undefined && operation.expectedRevision !== "absent" &&
+            current?.revision !== operation.expectedRevision) throw new Error(`revision conflict: ${key}`);
+      }
+      for (const operation of operations) {
+        const key = `${operation.collection}:${operation.key}`;
+        const current = records.get(key);
+        if (operation.op === "delete") records.delete(key);
+        else records.set(key, { value: operation.value, revision: String(Number(current?.revision || 0) + 1) });
+      }
+      return { results: [] };
+    }
+    if (method === "interaction.capture") {
+      captures += 1;
+      return { mime: "image/jpeg", width: 1, height: 1, dataBase64: "c3ludGhldGljLWZyYW1l" };
+    }
+    if (method === "interaction.tap") return { accepted: true };
+    if (method === "worker.wait") return { waitedMs: params.ms };
+    if (method === "network.request") {
+      const body = JSON.parse(params.bodyText);
+      const prompt = body.messages.map(message => typeof message.content === "string"
+        ? message.content : message.content?.map?.(part => part.text || "").join(" ")).join("\n");
+      let value;
+      if (prompt.includes("用户语义指令：")) {
+        value = { taskType: "one-shot", estimatedMinutes: 5, budgetMinutes: 15, strategy: "先读取，再回复并核验",
+          subtasks: [
+            { objective: "读取合成会话的最新消息", dependencies: [] },
+            { objective: "拟定并核验合成回复", dependencies: [0], objectKey: "synthetic:chat:one" },
+          ] };
+      } else if (prompt.includes("判断是否值得保存经验")) {
+        value = { saveExperience: false, saveTool: false };
+      } else if (prompt.includes("在本 AL 开始任何屏幕动作前")) {
+        value = { estimatedMinutes: 5, budgetMinutes: 15, strategy: "完成当前调度单元" };
+      } else if (prompt.includes("截图尺寸")) {
+        actionPrompts.push(prompt);
+        if (prompt.includes("子任务计划已逐项处理")) {
+          reviewTurns += 1;
+          if (reviewTurns === 1) {
+            value = { state: "action", evidence: "所有子任务完成，但需要在当前界面进行最终整体核对",
+              action: { type: "tap", target: "synthetic overall review control", label: "Review", x: 0.5, y: 0.5 } };
+          } else value = { state: "done", evidence: "我已核对整体用户目标，所有要求均已完成", operationResult: "verified" };
+        } else if (prompt.includes("子任务 1/2")) {
+          childOneDone += 1;
+          value = { state: "task-done", evidence: "已读取并确认合成会话中的最新消息" };
+        } else if (prompt.includes("子任务 2/2")) {
+          childTwoDone += 1;
+          value = { state: "task-done", evidence: "已拟定回复并完成当前子任务核对" };
+        } else throw new Error(`Unexpected action context: ${prompt.slice(0, 500)}`);
+      } else throw new Error(`Unexpected model purpose: ${prompt.slice(0, 160)}`);
+      return { status: 200, bodyText: JSON.stringify({ choices: [{ message: { content: JSON.stringify(value) } }] }) };
+    }
+    throw new Error(`Unexpected tool: ${method}`);
+  }
+
+  function deliver(event) {
+    let output = globalThis.onHaminnEvent(event);
+    for (let turn = 0; output?.actions?.length && turn < 160; turn += 1) {
+      const call = output.actions[0];
+      scheduledCalls.push(call.method);
+      output = globalThis.onHaminnEvent({ type: "tool.result", callId: call.callId, ok: true, result: tool(call.method, call.params) });
+    }
+    return output;
+  }
+
+  assert.equal(deliver({ type: "start" }).state, "idle");
+  const output = deliver({ type: "goal.submit", intent: "阅读合成会话的新消息，结合上下文拟定回复并确认整体目标完成" });
+
+  assert.equal(output.state, "done", JSON.stringify({ output, childOneDone, childTwoDone, reviewTurns, captures }));
+  assert.equal(childOneDone, 1);
+  assert.equal(childTwoDone, 1);
+  assert.equal(reviewTurns, 2, JSON.stringify({ message: "whole-OST judgment remains with the LLM after all children are done",
+    prompts: actionPrompts.map(prompt => prompt.match(/Goal 子任务计划[^\n]*/)?.[0] || prompt.match(/当前 HO 调度的子任务[^\n]*/)?.[0]) }));
+  assert.ok(captures >= 4, "each child and the final coordinator review must observe the synthetic screen");
+  const goal = [...records.entries()].find(([key]) => key.startsWith("goals:g:"))[1].value;
+  const tasks = [...records.entries()].filter(([key]) => key.startsWith("tasks:t:")).map(([, entry]) => entry.value);
+  const coordinator = tasks.find(task => task.kind === "coordination");
+  const children = tasks.filter(task => task.kind === "screen-work").sort((a, b) => a.planIndex - b.planIndex);
+  assert.equal(goal.state, "done");
+  assert.equal(coordinator.state, "done");
+  assert.deepEqual(children.map(task => task.state), ["done", "done"]);
+  assert.deepEqual(children[1].dependencies, [children[0].taskId]);
+  assert.equal(children.find(task => task.objective.includes("拟定"))?.objectKey, "synthetic:chat:one");
+  assert.ok(actionPrompts.some(prompt => prompt.includes("当前 OST：阅读合成会话的新消息")));
+  assert.ok(actionPrompts.some(prompt => prompt.includes("子任务计划已逐项处理")));
+  assert.ok(scheduledCalls.filter(method => method === "interaction.tap").length === 1);
+});
+
 test("LLM requests Persona and object Memory only when relevant and HO restores context after restart", () => {
   const records = new Map();
   const goalId = "goal-object-memory-context";
@@ -2420,4 +2529,34 @@ test("priority user cancel is handled before Worker startup and clears every que
   assert.equal(duplicate.duplicate, true);
   assert.equal(duplicate.queuedCancelled, 105);
   assert.equal(deliver({ type: "start" }).state, "cancelled");
+});
+
+test("Worker restart resumes dependency scheduling after a durable task-done decision", async () => {
+  await import(`./worker.mjs?task-done-restart=${Date.now()}`);
+  const first = { taskId: "task-restart-first", runId: "run-first", objective: "读取最新消息", kind: "screen-work",
+    state: "done", dependencies: [], objectKey: null, revision: 2, createdAt: 10, planIndex: 0, progress: "已读取" };
+  const second = { taskId: "task-restart-second", runId: "run-second", objective: "核对回复结果", kind: "screen-work",
+    state: "ready", dependencies: [first.taskId], objectKey: null, revision: 1, createdAt: 10, planIndex: 1, progress: "" };
+  const active = {
+    goalId: "goal-task-done-restart", taskId: first.taskId, runId: first.runId,
+    intent: "读取新消息并核对回复", state: "active", taskType: "one-shot", taskKind: "OST",
+    step: 2, revision: 5, createdAt: 10, progress: "已读取",
+    goalPlan: { scope: {}, triggers: [], completion: "LLM 判断", priority: 0, acceptedBoundary: "after-creation" },
+    taskPlan: { dependencies: first.dependencies, objectKey: first.objectKey }, taskRecordKind: first.kind,
+    taskObjective: first.objective, taskReviewMode: false,
+    taskGraph: { coordinatorTaskId: "task-restart-coordinator", coordinatorRunId: "run-coordinator",
+      coordinatorRevision: 2, currentTaskId: first.taskId, createdAt: 10, tasks: [first, second] },
+    lastDecision: { state: "task-done", evidence: "已读取最新消息" }, trace: [],
+  };
+  const start = globalThis.onHaminnEvent({ type: "start" });
+  assert.equal(start.actions[0].method, "data.get");
+  const resumed = globalThis.onHaminnEvent({ type: "tool.result", callId: start.actions[0].callId, ok: true,
+    result: { value: active, revision: "1" } });
+  assert.equal(resumed.actions[0].method, "data.batch");
+  const operations = resumed.actions[0].params.operations;
+  const nextTask = operations.find(item => item.collection === "tasks" && item.key === `t:${second.taskId}`)?.value;
+  const savedActive = operations.find(item => item.collection === "agent-runtime" && item.key === "active-goal")?.value;
+  assert.equal(nextTask.state, "running");
+  assert.equal(savedActive.taskId, second.taskId);
+  assert.equal(savedActive.lastDecision, null);
 });

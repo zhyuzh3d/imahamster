@@ -26,6 +26,23 @@ function selectedRecords(items, limit, collection) {
   })).filter(item => item.ref);
 }
 
+function selectedTaskGraph(state) {
+  const graph = state.taskGraph;
+  if (!Array.isArray(graph?.tasks) || !graph.tasks.length) return null;
+  const indexById = new Map(graph.tasks.map(task => [task.taskId, Number(task.planIndex) + 1]));
+  return {
+    coordinatorTaskRef: graph.coordinatorTaskId ? `task:${String(graph.coordinatorTaskId).slice(0, 128)}` : null,
+    currentTaskRef: state.taskId ? `task:${String(state.taskId).slice(0, 128)}` : null,
+    review: state.taskReviewMode === true,
+    tasks: graph.tasks.slice(0, 31).map(task => ({
+      ref: `task:${String(task.taskId || "").slice(0, 128)}`,
+      revision: Number(task.revision) || 0,
+      state: String(task.state || "").slice(0, 32),
+      dependsOn: (Array.isArray(task.dependencies) ? task.dependencies : []).map(id => indexById.get(id)).filter(Number.isFinite),
+    })),
+  };
+}
+
 function traceRef(goalId, event) {
   const at = Number(event?.at);
   const step = Number(event?.step);
@@ -49,7 +66,7 @@ export function buildContextManifest(state, {
   const identityVersion = Math.max(0, Number(identityCore?.version) || 0);
   const selected = selection ? {
     history: [], actionLoops: [], experiences: [], memories: [], memoryLookupRefs: [],
-    behaviorPatterns: [], toolCandidates: [], identityCore: null,
+    behaviorPatterns: [], toolCandidates: [], identityCore: null, taskGraph: selectedTaskGraph(state),
     ...selection,
   } : {
     history: history.map(event => traceRef(state.goalId, event)).filter(Boolean),
@@ -63,6 +80,7 @@ export function buildContextManifest(state, {
       source: identityVersion > 0 ? "user" : "package-default",
       version: identityVersion,
     } : null,
+    taskGraph: selectedTaskGraph(state),
   };
   const omitted = selection ? {
     history: 0, actionLoops: 0, experiences: 0, memories: 0,

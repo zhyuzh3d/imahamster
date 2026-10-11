@@ -21,6 +21,7 @@ import {
 } from "./ho/global-action-receipts.mjs";
 import { assertEventId, createEventReceipt, eventReceiptKey } from "./ho/events.mjs";
 import { prepareUserControlTransition } from "./ho/control.mjs";
+import { createTaskGraph, nextReadySubtask, setSubtaskState } from "./ho/task-plan.mjs";
 import { applyCurrentOperationOutcome, ensurePendingOperationHistory, rememberPendingOperation } from "./ho/operations.mjs";
 import { recordRecoveryFailure } from "./ho/recovery-signals.mjs";
 import {
@@ -388,7 +389,7 @@ function requestInitialTaskPlan() {
   const messages = [
     { role: "system", content: SYSTEM_PROMPT },
     { role: "user", content: `${currentTime}\n用户语义指令：${state.intent}
-先由你判断这是立即执行的单次任务 One-shot task（OST），还是需要等待外部事件并在每次触发时新建 OST 的事件驱动任务 Event-driven task（EDT）。只将明确长期监听、定时或条件触发的目标判为 EDT。通知 EDT 必须返回 trigger.kind=notification、精确 sourcePackages（最多 16 个）和简要 description；不得用通配符，也不得扩大到用户未指定的应用。定时 EDT 返回 trigger.kind=timer 和 schedule：一次性使用 {"kind":"once","at":<未来 epoch 毫秒>}；固定间隔使用 {"kind":"interval","intervalMs":<至少 60000> ,"firstAt":<可选 epoch 毫秒>}；每周重复使用 {"kind":"calendar","daysOfWeek":[1到7，周一为1],"hour":<设备本地小时>,"minute":<设备本地分钟>}。日历时间按设备本地时钟；epoch 时间按 UTC 毫秒。若时间、触发来源或规则无法确定，返回 classificationQuestion 请求补充，不能猜测。Haminn 负责持久化 timer；每次实际触发会建立一个独立 OST，EDT 自身没有单次时限。对于 OST，在本 AL 开始任何屏幕动作前，先预估本次 AL 分钟数，必须是 1 到 30 的整数，默认预算 15 分钟且至少覆盖预估，并给出最短可行策略。只返回 JSON：OST 示例 {"taskType":"one-shot","estimatedMinutes":5,"budgetMinutes":15,"strategy":"先观察并直接完成","classificationQuestion":""}；通知 EDT 示例 {"taskType":"event-driven","trigger":{"kind":"notification","sourcePackages":["com.example.chat"],"description":"该应用出现符合用户要求的新通知"}}；计时 EDT 示例 {"taskType":"event-driven","trigger":{"kind":"timer","schedule":{"kind":"calendar","daysOfWeek":[1,2,3,4,5,6,7],"hour":9,"minute":0},"description":"每天上午九点执行"}}` },
+先由你判断这是立即执行的单次任务 One-shot task（OST），还是需要等待外部事件并在每次触发时新建 OST 的事件驱动任务 Event-driven task（EDT）。只将明确长期监听、定时或条件触发的目标判为 EDT。通知 EDT 必须返回 trigger.kind=notification、精确 sourcePackages（最多 16 个）和简要 description；不得用通配符，也不得扩大到用户未指定的应用。定时 EDT 返回 trigger.kind=timer 和 schedule：一次性使用 {"kind":"once","at":<未来 epoch 毫秒>}；固定间隔使用 {"kind":"interval","intervalMs":<至少 60000> ,"firstAt":<可选 epoch 毫秒>}；每周重复使用 {"kind":"calendar","daysOfWeek":[1到7，周一为1],"hour":<设备本地小时>,"minute":<设备本地分钟>}。日历时间按设备本地时钟；epoch 时间按 UTC 毫秒。若时间、触发来源或规则无法确定，返回 classificationQuestion 请求补充，不能猜测。Haminn 负责持久化 timer；每次实际触发会建立一个独立 OST，EDT 自身没有单次时限。对于 OST，在本 AL 开始任何屏幕动作前，先预估本次 AL 分钟数，必须是 1 到 30 的整数，默认预算 15 分钟且至少覆盖预估，并给出最短可行策略。只返回 JSON：OST 示例 {"taskType":"one-shot","estimatedMinutes":5,"budgetMinutes":15,"strategy":"先观察并直接完成","classificationQuestion":"","subtasks":[{"objective":"核对目标会话中的新消息","dependencies":[],"objectKey":null},{"objective":"结合上下文回复并核对结果","dependencies":[0],"objectKey":null}]}。复杂目标才拆分，简单目标省略 subtasks；最多 31 项。dependencies 只能引用更早子任务的数组索引；objectKey 不确定时为 null。通知 EDT 示例 {"taskType":"event-driven","trigger":{"kind":"notification","sourcePackages":["com.example.chat"],"description":"该应用出现符合用户要求的新通知"}}；计时 EDT 示例 {"taskType":"event-driven","trigger":{"kind":"timer","schedule":{"kind":"calendar","daysOfWeek":[1,2,3,4,5,6,7],"hour":9,"minute":0},"description":"每天上午九点执行"}}` },
   ];
   pendingContextManifest = buildContextManifest(state, {
     purpose: "task-plan",
@@ -1059,6 +1060,9 @@ function prepareGoalResume(reply = "") {
   if (reply) state.intent += `；用户补充：${String(reply).slice(0, 1200)}`;
   state.state = "active";
   state.waiting = null;
+  if (state.taskGraph && !state.taskReviewMode && state.taskGraph.tasks.some(task => task.taskId === state.taskId && task.state === "waiting")) {
+    state.taskGraph = setSubtaskState(state.taskGraph, state.taskId, "running", { at: Date.now() });
+  }
   state.recoveryAttempts = 0;
   startActiveSegment();
   pending = "resume-provider";
@@ -1066,6 +1070,7 @@ function prepareGoalResume(reply = "") {
 }
 
 function continueAfterActiveLoad() {
+  if (state.taskGraph && state.lastDecision?.state === "task-done") return advanceTaskGraph();
   if (state.state === "paused") return { state: "paused", progress: state.progress || "任务已暂停" };
   if (state.waiting?.userRequired) return { state: "waiting", progress: state.progress, userRequired: true };
   state.state = "active";
@@ -1086,7 +1091,7 @@ function providerRequest(frame) {
   const messages = [
     { role: "system", content: SYSTEM_PROMPT },
     { role: "user", content: [
-      { type: "text", text: `截图尺寸 ${frame.width}x${frame.height} 像素；坐标原点为整张截图左上角，归一化 x=屏幕像素x/截图宽度、y=屏幕像素y/截图高度；input 坐标必须落在可见输入框矩形中央，不能落在键盘区域。${contextText()}\n结合当前截图、用户目标和完整操作进展自行决定下一步。对“最新/是否存在/条件是否满足”作判断时，确认截图中的目标区域完整且未被键盘、菜单、弹窗遮挡；若目标列表可能还有未显示的较新内容，先滚动到最新位置或关闭遮挡并重新截图。你负责判断目标是否完成；完成时输出 done，并用 evidence 简要记录你的自我判断依据，系统会按原样保存，不做二次验收。动作坐标使用 0 到 1 的归一化坐标，input 必须提供截图中目标输入框中心的 x/y。等待模型期间菜单或布局可能变化，所有动作和坐标都必须依据本轮截图，菜单已消失时先重新观察。若任务需要角色或表达偏好，可请求 Identity Core；若可见对象的历史信息相关，可同时请求精确对象 Memory。只返回 state=context、截图证据和 contextRequest，不得猜测对象名称，也不得同时请求上下文并给动作。每次最多请求 8 个对象范围，重复范围不查询；Identity Core 每个 OST 最多请求一次，HO 查询后会重新截图。若存在上一步待核实操作，说明你对其结果的判断：verified、not-executed 或 unknown。格式：{"state":"action|context|wait|ask|done|stop","evidence":"你的进展、决定或完成判断依据","operationResult":"verified|not-executed|unknown","contextRequest":{"memoryObjectRefs":["contact:准确名称"],"includeIdentityCore":true},"action":{"type":"tap|swipe|input|back|home","target":"目标","label":"按钮文字","x":0,"y":0,"fromX":0,"fromY":0,"toX":0,"toY":0,"durationMs":400,"text":"输入文本","mode":"replace","focused":true,"effect":"none|send|submit|publish|friend-add|external","visibleTarget":"截图中的对象","visibleContent":"截图中的完整正文"},"waitMs":5000,"question":"","reason":""}` },
+      { type: "text", text: `截图尺寸 ${frame.width}x${frame.height} 像素；坐标原点为整张截图左上角，归一化 x=屏幕像素x/截图宽度、y=屏幕像素y/截图高度；input 坐标必须落在可见输入框矩形中央，不能落在键盘区域。${contextText()}\n结合当前截图、用户目标、当前 HO 子任务（若存在）和完整操作进展自行决定下一步。分解目标中，task-done 只表示当前子任务已完成；done 只表示你判断整个用户目标已完成。对“最新/是否存在/条件是否满足”作判断时，确认截图中的目标区域完整且未被键盘、菜单、弹窗遮挡；若目标列表可能还有未显示的较新内容，先滚动到最新位置或关闭遮挡并重新截图。你负责判断目标是否完成；完成时输出 done，并用 evidence 简要记录你的自我判断依据，系统会按原样保存，不做二次验收。动作坐标使用 0 到 1 的归一化坐标，input 必须提供截图中目标输入框中心的 x/y。等待模型期间菜单或布局可能变化，所有动作和坐标都必须依据本轮截图，菜单已消失时先重新观察。若任务需要角色或表达偏好，可请求 Identity Core；若可见对象的历史信息相关，可同时请求精确对象 Memory。只返回 state=context、截图证据和 contextRequest，不得猜测对象名称，也不得同时请求上下文并给动作。每次最多请求 8 个对象范围，重复范围不查询；Identity Core 每个 OST 最多请求一次，HO 查询后会重新截图。若存在上一步待核实操作，说明你对其结果的判断：verified、not-executed 或 unknown。格式：{"state":"action|context|wait|ask|task-done|done|stop","evidence":"你的进展、决定或完成判断依据","operationResult":"verified|not-executed|unknown","contextRequest":{"memoryObjectRefs":["contact:准确名称"],"includeIdentityCore":true},"action":{"type":"tap|swipe|input|back|home","target":"目标","label":"按钮文字","x":0,"y":0,"fromX":0,"fromY":0,"toX":0,"toY":0,"durationMs":400,"text":"输入文本","mode":"replace","focused":true,"effect":"none|send|submit|publish|friend-add|external","visibleTarget":"截图中的对象","visibleContent":"截图中的完整正文"},"waitMs":5000,"question":"","reason":""}` },
       { type: "image_url", image_url: { url: `data:${frame.mime || "image/jpeg"};base64,${frame.dataBase64}` } },
     ] },
   ];
@@ -1099,9 +1104,13 @@ function parseDecision(text) {
   const end = cleaned.lastIndexOf("}");
   if (start < 0 || end <= start) throw new Error("模型没有返回 JSON 决策");
   const decision = JSON.parse(cleaned.slice(start, end + 1));
-  if (!decision || !["action", "context", "wait", "ask", "done", "stop"].includes(decision.state) ||
+  if (!decision || !["action", "context", "wait", "ask", "task-done", "done", "stop"].includes(decision.state) ||
       typeof decision.evidence !== "string" || !decision.evidence.trim() || decision.evidence.length > 360) {
     throw new Error("模型决策缺少有效状态或截图证据");
+  }
+  if (decision.state === "task-done" && (!state?.taskGraph || state.taskReviewMode ||
+      !state.taskGraph.tasks.some(task => task.taskId === state.taskId))) {
+    throw new Error("task-done 只能用于当前执行子任务；整体目标复核阶段必须由 LLM 判断 done 或继续推进");
   }
   if (state?.pendingOperationId && !["verified", "not-executed", "unknown"].includes(decision.operationResult)) {
     throw new Error("模型需要记录自己对上一步操作结果的判断");
@@ -1235,6 +1244,9 @@ function saveActionLoopPlan(text) {
     state.goalAttemptStartedAt = Date.now();
     state.goalDeadlineAt = state.goalAttemptStartedAt + MAX_GOAL_DURATION_MS;
     appendTrace("task.classified", { taskKind: "OST" });
+    if (plan.subtasks !== undefined && (!Array.isArray(plan.subtasks) || plan.subtasks.length > 0)) {
+      return persistSubtaskPlan(plan);
+    }
     beginActionLoop(state, "initial-task");
   }
   return applyActionLoopPlan(plan);
@@ -1290,6 +1302,48 @@ function requestEventTaskSubscription() {
   }, "notifications.subscribe", {
     subscriptionId: task.eventTaskId, sourcePackages: task.trigger.sourcePackages,
   }, "event-task-subscription");
+}
+
+function persistSubtaskPlan(plan) {
+  const now = Date.now();
+  const coordinatorTaskId = state.taskId;
+  const graph = createTaskGraph(plan.subtasks, {
+    goalId: state.goalId,
+    coordinatorTaskId,
+    createdAt: now,
+    makeTaskId: index => `${coordinatorTaskId}-s${index + 1}`,
+    makeRunId: index => `${now.toString(36)}-${index.toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+  });
+  const coordinatorRunId = state.runId;
+  const coordinatorRevision = Number(state.revision || 1) + 1;
+  state.coordinatorTaskId = coordinatorTaskId;
+  state.taskGraph = { ...graph, coordinatorRunId, coordinatorRevision };
+  state.taskReviewMode = false;
+  const first = graph.tasks[0];
+  state.taskId = first.taskId;
+  state.runId = first.runId;
+  state.taskObjective = first.objective;
+  state.taskPlan = taskPlanFromRecord(first);
+  state.taskRecordKind = first.kind;
+  state.progress = `LLM 已拆分为 ${graph.tasks.length} 个 Task；HO 开始调度第 1 项。`;
+  state.pendingActionLoopPlan = plan;
+  beginActionLoop(state, "initial-task");
+  appendTrace("task.plan-created", { coordinatorTaskId, taskIds: graph.tasks.map(task => task.taskId), count: graph.tasks.length });
+
+  const coordinator = {
+    schemaVersion: 1, taskId: coordinatorTaskId, goalId: state.goalId, runId: coordinatorRunId,
+    revision: coordinatorRevision, kind: "coordination", objective: state.intent, state: "waiting",
+    dependencies: graph.tasks.map(task => task.taskId), objectKey: null,
+    progress: "等待 HO 调度的子任务完成后，再由 LLM 评估整体用户目标。",
+    waiting: { reason: "等待子任务", since: now }, resultRefs: [], createdAt: state.createdAt, updatedAt: now,
+  };
+  pending = "task-plan-saved";
+  return action("data.batch", { operations: [
+    record("goals", `g:${state.goalId}`, goalProgressRecord(state, "active", now)),
+    record("tasks", `t:${coordinatorTaskId}`, coordinator),
+    ...graph.tasks.map(task => record("tasks", `t:${task.taskId}`, task)),
+    record(COLLECTION, ACTIVE_KEY, state),
+  ] });
 }
 
 function saveEventTaskSubscriptionResult(result) {
@@ -1497,6 +1551,26 @@ function storeDecision(decision) {
   state.lastProgressAt = Date.now();
   state.progress = decision.evidence;
   state.lastDecision = decision;
+  if (state.taskGraph && !state.taskReviewMode) {
+    if (decision.state === "task-done") {
+      state.taskGraph = setSubtaskState(state.taskGraph, state.taskId, "done", { progress: decision.evidence, at: Date.now() });
+    } else if (decision.state === "done") {
+      const current = state.taskGraph.tasks.find(task => task.taskId === state.taskId);
+      if (current && current.state !== "done") {
+        state.taskGraph = setSubtaskState(state.taskGraph, state.taskId, "done", { progress: decision.evidence, at: Date.now() });
+      }
+      for (const task of [...state.taskGraph.tasks]) {
+        if (task.state !== "done") state.taskGraph = setSubtaskState(state.taskGraph, task.taskId, "cancelled", {
+          progress: "整体目标已由 LLM 判定完成，未开始的 Task 不再调度。", at: Date.now(),
+        });
+      }
+    } else if (["wait", "ask", "stop"].includes(decision.state)) {
+      state.taskGraph = setSubtaskState(state.taskGraph, state.taskId, "waiting", { progress: decision.evidence, at: Date.now() });
+    } else if (decision.state === "action") {
+      const current = state.taskGraph.tasks.find(task => task.taskId === state.taskId);
+      if (current && current.state !== "running") state.taskGraph = setSubtaskState(state.taskGraph, state.taskId, "running", { at: Date.now() });
+    }
+  }
   state.noProgressCount = decision.evidence && decision.evidence === previousProgress
     ? Number(state.noProgressCount || 0) + 1 : 0;
   state.recoveryAttempts = 0;
@@ -1530,6 +1604,11 @@ function storeDecision(decision) {
     if (state.actionLoop) finishActionLoop(state, "completed");
     state.state = "done";
     state.waiting = null;
+  } else if (decision.state === "task-done") {
+    finishActiveSegment();
+    if (state.actionLoop) finishActionLoop(state, "completed-task");
+    state.state = "active";
+    state.waiting = null;
   } else if (decision.state === "stop") {
     if (state.actionLoop) finishActionLoop(state, "completed-stop");
     if (state.stopDecisions >= 5) {
@@ -1549,15 +1628,95 @@ function storeDecision(decision) {
   }
 }
 
+function scheduledTaskState(task, parentState, status, revision = task.revision) {
+  return {
+    ...parentState,
+    taskId: task.taskId,
+    runId: task.runId,
+    taskObjective: task.objective,
+    taskPlan: taskPlanFromRecord(task),
+    taskRecordKind: task.kind,
+    revision,
+    createdAt: task.createdAt || parentState.createdAt,
+    waiting: status === "waiting" ? parentState.waiting : null,
+  };
+}
+
+function advanceTaskGraph() {
+  const graph = state.taskGraph;
+  if (!graph?.tasks?.length) throw new Error("Task-done 回执缺少持久 Task graph");
+  const next = nextReadySubtask(graph);
+  if (next) {
+    state.taskGraph = setSubtaskState(graph, next.taskId, "running", { at: Date.now() });
+    state.taskId = next.taskId;
+    state.runId = next.runId;
+    state.taskObjective = next.objective;
+    state.taskPlan = taskPlanFromRecord(next);
+    state.taskRecordKind = next.kind;
+    state.taskReviewMode = false;
+    state.progress = `当前子任务已由 LLM 标记完成；HO 调度第 ${Number(next.planIndex) + 1} 项。`;
+    appendTrace("task.scheduler-dispatched", { taskId: next.taskId, index: next.planIndex, count: graph.tasks.length });
+  } else if (graph.tasks.every(task => task.state === "done")) {
+    state.taskId = graph.coordinatorTaskId;
+    state.runId = graph.coordinatorRunId;
+    state.taskObjective = state.intent;
+    state.taskPlan = { dependencies: graph.tasks.map(task => task.taskId), objectKey: null };
+    state.taskRecordKind = "coordination";
+    state.taskReviewMode = true;
+    state.taskGraph = { ...graph, coordinatorRevision: Number(graph.coordinatorRevision || 1) + 1 };
+    state.progress = "全部拆分 Task 已完成；现在由 LLM 依据原始目标复核整体进展并决定完成或继续。";
+    appendTrace("task.scheduler-review", { coordinatorTaskId: graph.coordinatorTaskId, completedCount: graph.tasks.length });
+  } else {
+    throw new Error("Task graph 没有可调度的 ready Task，且仍存在未完成项");
+  }
+  state.revision = Number(state.revision || 0) + 1;
+  state.lastProgressAt = Date.now();
+  state.lastDecision = null;
+  state.state = "active";
+  state.waiting = null;
+  const taskState = scheduledTaskState(
+    state.taskGraph.tasks.find(task => task.taskId === state.taskId) || {
+      taskId: state.taskId, runId: state.runId, objective: state.taskObjective,
+      dependencies: state.taskPlan.dependencies, objectKey: state.taskPlan.objectKey,
+      kind: state.taskRecordKind, revision: state.taskGraph.coordinatorRevision, createdAt: state.createdAt,
+    }, state, "running", state.revision);
+  pending = "task-handoff-saved";
+  return action("data.batch", { operations: [
+    record("goals", `g:${state.goalId}`, goalProgressRecord(state, "active", Date.now())),
+    record("tasks", `t:${state.taskId}`, taskProgressRecord(taskState, "running", Date.now())),
+    record(COLLECTION, ACTIVE_KEY, state),
+  ] });
+}
+
 function updateGoalAndTask(decision) {
   const now = Date.now();
   const goalState = state.state === "done" ? "done" : state.state === "failed" ? "active" : "active";
-  const taskState = state.state === "done" ? "done" : state.state === "failed" ? "failed" : state.state === "waiting" ? "waiting" : "running";
-  return [
+  const taskState = decision?.state === "task-done" || state.state === "done" ? "done"
+    : state.state === "failed" ? "failed" : state.state === "waiting" ? "waiting" : "running";
+  const operations = [
     record("goals", `g:${state.goalId}`, goalProgressRecord(state, goalState, now)),
     record("tasks", `t:${state.taskId}`, taskProgressRecord(state, taskState, now)),
     record(COLLECTION, ACTIVE_KEY, state),
   ];
+  if (state.state === "done" && state.taskGraph) {
+    if (state.taskId !== state.taskGraph.coordinatorTaskId) {
+      const coordinator = scheduledTaskState({
+        taskId: state.taskGraph.coordinatorTaskId, runId: state.taskGraph.coordinatorRunId,
+        objective: state.intent, dependencies: state.taskGraph.tasks.map(task => task.taskId), objectKey: null,
+        kind: "coordination", revision: state.taskGraph.coordinatorRevision, createdAt: state.createdAt,
+      }, state, "done", Number(state.revision || 1));
+      coordinator.state = "done";
+      coordinator.waiting = null;
+      operations.splice(1, 0, record("tasks", `t:${coordinator.taskId}`, taskProgressRecord(coordinator, "done", now)));
+    }
+    for (const task of state.taskGraph.tasks.filter(item => item.state === "cancelled" && item.taskId !== state.taskId)) {
+      const cancelled = scheduledTaskState(task, state, "cancelled", task.revision);
+      cancelled.progress = task.progress || "整体目标已由 LLM 判定完成，Task 不再调度。";
+      operations.splice(operations.length - 1, 0,
+        record("tasks", `t:${task.taskId}`, taskProgressRecord(cancelled, "cancelled", now)));
+    }
+  }
+  return operations;
 }
 
 function persistDecision(decision) {
@@ -1961,6 +2120,13 @@ function advanceAfterTool(event) {
       goalId: state.goalId, progress: state.progress,
     };
     case "queue-saved": return { state: "queued" };
+    case "task-plan-saved": {
+      const plan = state.pendingActionLoopPlan;
+      delete state.pendingActionLoopPlan;
+      if (!plan) throw new Error("Task plan 已保存，但初始 AL 计划丢失");
+      return applyActionLoopPlan(plan);
+    }
+    case "task-handoff-saved": return beginActionLoopPlanning(state.taskReviewMode ? "goal-review" : "next-subtask");
     case "get-provider": {
       const config = result?.value;
       if (!providerValid(config)) throw new Error("模型配置无效或尚未设置");
@@ -1973,6 +2139,10 @@ function advanceAfterTool(event) {
       if (!providerValid(result?.value)) return pauseForUser("后台任务无法读取有效模型配置", "model-configuration");
       provider = result.value;
       appendTrace("model.ready", { model: provider.model, resumed: true });
+      if (state.taskGraph) {
+        pending = "resume-saved";
+        return action("data.batch", { operations: updateGoalAndTask(state.lastDecision) });
+      }
       return persist("resume-saved");
     }
     case "load-active": {
@@ -2106,6 +2276,7 @@ function advanceAfterTool(event) {
       return applyProviderText(state.providerPurpose, parseChatCompletionContent(responseText, state.providerPurpose));
     }
     case "decision-saved": {
+      if (state.lastDecision?.state === "task-done" && state.taskGraph) return advanceTaskGraph();
       if (terminal(state.state)) {
         if (state.state === "done" && state.learningStatus !== "complete" && state.learningStatus !== "skipped") {
           state.learningStatus = "pending";

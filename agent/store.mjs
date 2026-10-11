@@ -1,4 +1,5 @@
 import { GoalState, TaskState, assertTransition, newId, validateGoal, validateTask } from "./model.mjs";
+import { normalizeTaskSpecifications } from "./ho/task-plan.mjs";
 
 const COLLECTIONS = Object.freeze({
   GOALS: "goals",
@@ -107,34 +108,13 @@ export class AgentStore {
     if (!goal || goal.value.state !== GoalState.ACTIVE) throw new Error("Task plan requires an active Goal");
 
     const at = this.now();
-    const taskIds = specifications.map((specification) => specification?.taskId || this.id());
-    if (new Set(taskIds).size !== taskIds.length) throw new TypeError("Task plan contains duplicate task IDs");
-    const tasks = specifications.map((specification, index) => {
-      if (!specification || typeof specification !== "object") throw new TypeError(`Task ${index} is invalid`);
-      const dependencies = specification.dependencies || [];
-      if (!Array.isArray(dependencies) || dependencies.some((dependencyIndex) =>
-        !Number.isInteger(dependencyIndex) || dependencyIndex < 0 || dependencyIndex >= index)) {
-        throw new TypeError(`Task ${index} dependencies must reference earlier tasks in this plan`);
-      }
-      const task = validateTask({
-        schemaVersion: 1,
-        taskId: taskIds[index],
-        goalId,
-        runId: specification.runId || this.id(),
-        revision: 1,
-        kind: specification.kind || "work",
-        objective: specification.objective || goal.value.intent,
-        state: TaskState.READY,
-        dependencies: [...new Set(dependencies.map((dependencyIndex) => taskIds[dependencyIndex]))],
-        objectKey: specification.objectKey || null,
-        progress: "",
-        waiting: null,
-        resultRefs: [],
-        createdAt: at,
-        updatedAt: at,
-      });
-      return task;
-    });
+    const tasks = normalizeTaskSpecifications(specifications, {
+      goalId, createdAt: at,
+      makeTaskId: (_index, specification) => specification?.taskId || this.id(),
+      makeRunId: (_index, specification) => specification?.runId || this.id(),
+      defaultKind: "work", defaultObjective: goal.value.intent, firstState: TaskState.READY,
+      minTasks: 1, maxTasks: 32, label: "Task",
+    }).map(validateTask);
 
     const operations = tasks.map((task) => ({ op: "put", collection: COLLECTIONS.TASKS,
       key: `t:${task.taskId}`, expectedRevision: "absent", value: task }));

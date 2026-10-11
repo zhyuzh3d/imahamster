@@ -137,14 +137,15 @@ app.js                    # 页面初始化、现有配置和 UI 组合入口
 
 | 记录 | 关键字段 |
 |---|---|
-| OST | `taskId, kind, intent, origin, state, sourceEdtId?, triggerEventId?, retryOfOstId?, plan, progress, startedAt, deadlineAt, maxDurationMs, usageLimit:null, activeAlId, lastResult` |
-| EDT | `taskId, kind, intent, state, triggerDefinitions, subscriptionRefs, cursor, missedPolicy, nextDueAt?, revision` |
+| OST / 当前存储投影 `Goal` | 一次用户目标或一次 EDT 触发实例：`goalId, intent, origin, state, sourceEdtId?, triggerEventId?, retryOfOstId?, progress, startedAt, deadlineAt, maxDurationMs, usageLimit:null, activeAlId, lastResult` |
+| Task | HO 在一个 OST 内调度的工作单元：`taskId, goalId, runId, kind, objective, state, dependencies, objectKey, progress, waiting, resultRefs`；简单 OST 通常只有一个 Task，复杂 OST 可由 LLM 拆分为协调 Task 与依赖子 Task |
+| EDT | 持续用户目标：`taskId, kind, intent, state, triggerDefinitions, subscriptionRefs, cursor, missedPolicy, nextDueAt?, revision`；每次触发创建独立 OST |
 | AL | `alId, ostId, index, state, estimatedBudgetMs, checkpointAt, plan, historyRefs, summaryRef, endReason` |
 | 控制/事件 | `eventId/commandId, source, type, occurredAt, receivedAt, revision, payloadRef, status, correlation` |
 | 模型/原生 job | `jobId, workerEpoch, ostId, alId, phase, requestRevision, startedAt, deadlineAt, status, resultRef` |
 | 操作记录 | `operationId, ostId, alId, intent, effectKind, phase, nativeReceipt, observationRefs, llmConclusion` |
 
-内部工作单元属于 OST 的计划与进展，可有 ID 和依赖，但不新建一套产品 Task 状态机。若以后实际需要细粒度并行，再根据证据扩展；本轮不预建复杂 DAG 执行平台。
+OST 是用户目标的一次执行边界，Task 是 HO 调度的目标工作单元，两者不等同。LLM 可在初始规划中把复杂 OST 拆为 2–31 个有向无环依赖 Task；HO 只校验结构、持久化并按依赖顺序调度，不评价子 Task 或 OST 是否完成。每个子 Task 的完成结论和整体 OST 的最终结论均由 LLM 根据操作历史与当前状态作出。当前设备操作路径一次只运行一个子 Task；并行执行尚未实现，须先有可并发且互不争用屏幕的工具/任务证据再扩展，不能并发驱动同一手机界面。
 
 状态分离：原生回执记录准备/已提交/受理/已执行/拒绝/未知等事实；`verified/not-executed/unknown` 等 LLM 对业务效果的结论另外记录。HO 不把 accepted 改名为任务成功，也不因 LLM 未给业务证据而否决其 completed 结论。
 
@@ -582,7 +583,14 @@ JS 测试适合纯状态与组装；QuickJS/Android 仪器测试负责真实模�
 
 - 对照现有 `Goal` / `Task` schema 和升级目标复核后确认：Worker 每次写入进度都会重新拼整条记录，把 `scope`、`triggers`、`completion`、优先级、Task 依赖及 `objectKey` 重置成空默认值；同时，旧版 Worker 状态没有计划投影，恢复也不会从持久记录补载。这是复杂任务计划接入 HO 前必须消除的数据丢失缺陷。
 - 将计划投影和进度记录组装收敛到 `agent/ho/records.mjs`。Worker 创建 OST 时将受控 Goal/Task 计划字段留在活动状态；从旧状态恢复时，对缺失投影顺序读取已保存 Goal 与 Task，再继续原恢复路径；后续更新保留触发规则、范围、完成说明、优先级、依赖、对象键及 OST/EDT 来源标记。宿主数据读取失败仍走既有关键持久读取恢复通道。
-- 新增 Worker 重启集成回归：预置带有非默认 Goal/Task 计划字段的旧活动状态，在启动时补载并由模型完成后，确认这些字段仍在持久记录中；另覆盖读取计划失败时必须停止恢复并保留可恢复存储错误。全量 `node --test` 117/117 通过，`node --check app.js`、`node --check agent/worker.mjs` 与 `git diff --check` 通过。该修复仅保证计划字段不丢失，不代表 Worker 已接入 `AgentStore` 或已具备 LLM 复杂目标拆分及多 Task 调度；后两项仍属未完成的 HO 能力。CMA-AN00 当前仍未出现在 `adb devices -l`，未部署或重复执行真机实验。
+- 新增 Worker 重启集成回归：预置带有非默认 Goal/Task 计划字段的旧活动状态，在启动时补载并由模型完成后，确认这些字段仍在持久记录中；另覆盖读取计划失败时必须停止恢复并保留可恢复存储错误。全量 `node --test` 117/117 通过，`node --check app.js`、`node --check agent/worker.mjs` 与 `git diff --check` 通过。当时复杂目标拆分和多 Task 调度仍未接入；后续实现见第 10.36 节。该时点 CMA-AN00 未出现在 ADB，故没有部署或重复执行真机实验。
+
+### 10.36 HO 调度 LLM 拆分的 OST Task（2026-10-11）
+
+- 按产品术语澄清 OST 是用户目标的一次执行边界，Task 是 HO 在 OST 内调度的工作单元；Task 可以对应一个 AL，也可在换路/续行时跨多个 AL。复杂 OST 的拆分由 LLM 决定，HO 只校验依赖结构、持久化和调度，不替 LLM 规划具体内容或验收结果。
+- 新增 `agent/ho/task-plan.mjs`，统一 Worker 与 AgentStore 的 Task 结构校验及依赖索引到 Task ID 映射。初始 Task 分类可选择不拆分，或提交 2–31 个只依赖较早 Task 的子任务；HO 原子保存协调 Task、子 Task 与活动检查点，并依赖顺序逐一调度。子任务输出 `task-done` 只结束当前子任务；全部子任务处理后，HO 把控制交回 LLM 复核整体目标，只有 LLM 输出 `done` 才记录 OST 完成。LLM 提前判定整体目标已完成时，未完成子任务会被记录为取消，不继续调度。
+- CAE 为模型提供当前 Task、任务依赖/状态及整体目标复核上下文；追踪 manifest 记录 Task 引用和依赖，不复制子任务的私密正文。子 Task 完成与后续调度分成两个原子持久化阶段，Worker 在两阶段之间重启时可从 `lastDecision=task-done` 恢复调度。`AgentStore.createTaskPlan()` 复用同一结构校验，避免并行维护两套 DAG 规则。
+- 全量 `node --test` 122/122 通过；涉及文件的 `node --check` 与 `git diff --check` 通过。此实现目前串行调度屏幕 Task，未实现互不争用设备的并发 Task；当前 `adb devices -l` 仅有 `emulator-5554`，USB 真机不可见，因此此项仅有合成 Worker/存储测试证据，尚未部署或完成手机/微信验收。
 
 ## 11. 交付与完成判定
 
