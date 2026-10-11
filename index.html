@@ -59,6 +59,22 @@
       <p class="privacy-note worker-note">暂停会在停止后台执行后保存进度；继续时先重新截图核对未完成操作。</p>
     </section>
 
+    <section id="ic-panel" class="card memory-panel" aria-labelledby="ic-title">
+      <div class="card-heading">
+        <h2 id="ic-title">Persona · Identity Core</h2>
+        <button id="ic-refresh" class="button secondary memory-refresh" type="button" disabled>刷新</button>
+      </div>
+      <p class="memory-description">这是稳定的人格核心文档，只能由用户明确修订。它作为角色参考进入相关上下文，不会更改任务授权或执行边界。</p>
+      <details id="ic-details" class="memory-details">
+        <summary>查看和编辑 Identity Core</summary>
+        <p id="ic-notice" class="memory-notice" role="status" aria-live="polite">展开后读取本机文档</p>
+        <p id="ic-meta" class="ic-meta"></p>
+        <p id="ic-content" class="ic-content" hidden></p>
+        <textarea id="ic-editor" class="ic-editor" maxlength="2000" aria-label="Identity Core 内容" hidden></textarea>
+        <div id="ic-actions" class="ic-actions"></div>
+      </details>
+    </section>
+
     <section id="bp-panel" class="card memory-panel" aria-labelledby="bp-title">
       <div class="card-heading">
         <h2 id="bp-title">Persona · BP</h2>

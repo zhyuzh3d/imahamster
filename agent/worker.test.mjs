@@ -155,7 +155,7 @@ test("background goal persists progress and completes across screenshot cycles",
   assert.ok(journal.some((event) => event.phase === "action-loop.started"));
 });
 
-test("LLM can request exact object memory and HO recovers that request after a Worker restart", () => {
+test("LLM requests Persona and object Memory only when relevant and HO restores context after restart", () => {
   const records = new Map();
   const goalId = "goal-object-memory-context";
   const active = { goalId, taskId: "task-object-memory-context", runId: "run-object-memory-context",
@@ -168,6 +168,9 @@ test("LLM can request exact object memory and HO recovers that request after a W
     id: "memory:contact-zhangsan", type: "memory", kind: "fact", state: "active",
     objectRefs: ["contact:张三"], content: "张三喜欢周末徒步", sourceRefs: ["trace:synthetic"], observedAt: 10,
     inference: "observed", tags: ["徒步"], revision: 1,
+  }, revision: "1" });
+  records.set("self-model:identity-core", { value: {
+    schemaVersion: 1, type: "identity-core", content: "我表达自然直接，也会先理解对方的处境。", version: 2,
   }, revision: "1" });
   const actionPrompts = [];
   let actionTurns = 0;
@@ -208,19 +211,22 @@ test("LLM can request exact object memory and HO recovers that request after a W
       if (prompt.includes("截图尺寸")) actionPrompts.push(prompt);
       return modelCall(params, () => {
         actionTurns += 1;
-        return actionTurns <= 2
-          ? { state: "context", evidence: "当前截图显示张三会话，回复时需要了解相关历史背景", contextRequest: { memoryObjectRefs: ["contact:张三"] } }
-          : { state: "done", evidence: "已结合张三的相关记忆完成回复并核对结果" };
+        if (actionTurns === 1) return { state: "context", evidence: "本次回复需要遵循用户设定的表达偏好", contextRequest: { includeIdentityCore: true } };
+        if (actionTurns === 2) return { state: "context", evidence: "当前截图显示张三会话，回复需要了解相关历史背景", contextRequest: { memoryObjectRefs: ["contact:张三"] } };
+        if (actionTurns === 3) return { state: "context", evidence: "再次确认张三关系背景和角色偏好", contextRequest: {
+          memoryObjectRefs: ["contact:张三"], includeIdentityCore: true,
+        } };
+        return { state: "done", evidence: "已结合张三记忆和角色偏好完成回复并核对结果" };
       });
     }
     throw new Error(`Unexpected tool: ${method}`);
   }
 
   let output = globalThis.onHaminnEvent({ type: "start" });
-  for (let turn = 0; output?.actions?.length && turn < 40; turn += 1) {
+  for (let turn = 0; output?.actions?.length && turn < 100; turn += 1) {
     const call = output.actions[0];
     if (!restartedDuringLookup && call.method === "data.scan" && call.params.prefix === "memory:" &&
-        records.get("agent-runtime:active-goal")?.value.pendingMemoryRequest) {
+        records.get("agent-runtime:active-goal")?.value.pendingContextRequest?.objectRefs?.length) {
       restartedDuringLookup = true;
       output = globalThis.onHaminnEvent({ type: "start" });
       continue;
@@ -228,21 +234,31 @@ test("LLM can request exact object memory and HO recovers that request after a W
     output = globalThis.onHaminnEvent({ type: "tool.result", callId: call.callId, ok: true, result: tool(call.method, call.params) });
   }
 
-  assert.equal(output.state, "done");
+  assert.equal(output.state, "done", JSON.stringify({ output, actionTurns, captures, memoryScans,
+    pendingContextRequest: records.get("agent-runtime:active-goal")?.value?.pendingContextRequest,
+    state: records.get("agent-runtime:active-goal")?.value?.state,
+    trace: records.get("agent-runtime:active-goal")?.value?.trace?.slice(-8) }));
   assert.equal(restartedDuringLookup, true);
-  assert.equal(actionTurns, 3);
-  assert.equal(captures, 3, "the model should inspect a fresh screenshot after ME returns context");
+  assert.equal(actionTurns, 4);
+  assert.equal(captures, 4, "the model should inspect a fresh screenshot after each context request");
   assert.equal(memoryScans, 2, "a duplicate context request must not repeat the memory scan");
   assert.doesNotMatch(actionPrompts[0], /张三喜欢周末徒步/);
+  assert.doesNotMatch(actionPrompts[0], /我表达自然直接/);
   assert.match(actionPrompts[0], /state=context/);
-  assert.match(actionPrompts[0], /contextRequest\.memoryObjectRefs/);
-  assert.match(actionPrompts[1], /张三喜欢周末徒步/);
-  assert.match(actionPrompts[1], /contact:张三/);
-  assert.match(actionPrompts[2], /本次 OST 已达到/);
+  assert.match(actionPrompts[0], /includeIdentityCore/);
+  assert.doesNotMatch(actionPrompts[1], /张三喜欢周末徒步/);
+  assert.match(actionPrompts[1], /我表达自然直接，也会先理解对方的处境/);
+  assert.match(actionPrompts[1], /Identity Core（版本 2/);
+  assert.match(actionPrompts[2], /张三喜欢周末徒步/);
+  assert.match(actionPrompts[2], /Worker 恢复时重新载入用户 Identity Core 第 2 版/);
+  assert.match(actionPrompts[2], /contact:张三/);
+  assert.match(actionPrompts[3], /本次 OST 已达到/);
   const saved = records.get("agent-runtime:active-goal").value;
-  assert.equal(saved.trace.some(event => event.phase === "memory.context-requested"), true);
+  assert.equal(saved.trace.some(event => event.phase === "context.requested" && event.includeIdentityCore), true);
   assert.equal(saved.trace.some(event => event.phase === "memory.context-loaded" && event.memoryCount === 1), true);
-  assert.equal(saved.trace.some(event => event.phase === "memory.context-query-limited"), true);
+  assert.equal(saved.trace.some(event => event.phase === "identity-core.context-loaded" && event.version === 2), true);
+  assert.equal(saved.trace.some(event => event.phase === "identity-core.context-restored" && event.version === 2), true);
+  assert.equal(saved.trace.some(event => event.phase === "context.query-limited"), true);
 });
 
 test("an EDT notification is deduplicated, matched by the LLM, and creates one separate OST after durable acknowledgement", () => {

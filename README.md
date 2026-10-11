@@ -20,6 +20,8 @@ ImHamster 是普通 Haminn happ，不需要单例。Haminn 通过一个 Android 
 
 `agent/me/memory.mjs` 保存带来源的 fact/episode 对象记忆，区分直接观察与推测；任务文字没有对象名称时，LLM 可先从截图识别对象并请求精确 objectRef，ME 只返回该对象的记录，之后 Worker 重新截图再继续。学习只保留短摘要，不复制整段聊天。`ui/self-model.mjs` 组合 Persona/BP 与 Memory 管理面板：BP 可查看、修订、启用、停用或删除；Memory 可按需分页查看、修订对象范围与内容、二次确认删除。写操作使用 Bridge revision 防止覆盖并发修改；Memory 条目合并仍待后续设计。
 
+Identity Core 默认文档位于 `agent/sm/identity-core.mjs`，用户修订保存在 `self-model:identity-core` 并按版本更新；Identity Core 与不可变的操作策略分开。CAE 只在 LLM 判断任务需要角色或表达偏好时加载它，作为低优先级参考上下文，不扩大当前用户授权。BP、Memory 与 IC 的查看和编辑由独立 UI 模块管理。
+
 ## CodeBestie 请求兼容约定
 
 `/v1/chat/completions` 使用普通 JSON 请求。请求体只包含 `model` 和 `messages`；不要传 `stream`、`reasoning_effort`、`max_tokens` 或其他未经 CodeBestie 文档确认并在设备上验证的可选字段。当前只选择 `gpt-6-luna`，不单独发送推理档位；CodeBestie 对该模型的默认推理档位是否为 `low` 尚未验证。

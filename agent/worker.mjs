@@ -6,6 +6,7 @@ import { SYSTEM_PROMPT } from "./cae/prompts.mjs";
 import { retrieveRelevantExperiences } from "./me/retrieval.mjs";
 import { memorySourceRef, normalizeMemorySuggestion, retrieveMemoriesForObjects, retrieveRelevantMemories } from "./me/memory.mjs";
 import { normalizeBehaviorPattern, retrieveBehaviorPatterns } from "./sm/behavior-patterns.mjs";
+import { DEFAULT_IDENTITY_CORE, normalizeIdentityCoreRecord } from "./sm/identity-core.mjs";
 import { isRegisteredTool } from "./te/catalog.mjs";
 import { retrieveRelevantToolCandidates } from "./te/retrieval.mjs";
 import { attachJournalEvents, makeJournalEntry } from "./observability/journal.mjs";
@@ -57,6 +58,8 @@ const GLOBAL_ACTION_RECEIPT_STAGES = new Set([
 
 let state = null;
 let provider = null;
+let activeIdentityCore = { content: DEFAULT_IDENTITY_CORE, version: 0 };
+let identityCoreLoaded = false;
 let pending = "";
 let callSequence = 0;
 const workerEpoch = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
@@ -115,7 +118,7 @@ function applyProviderText(purpose, text) {
         });
         return beginActionLoopReviewCapture();
       }
-      if (decision.state === "context") return requestMemoryContext(decision);
+      if (decision.state === "context") return requestSupplementalContext(decision);
       return persistDecision(decision);
     }
     case "al-plan": return saveActionLoopPlan(text);
@@ -319,6 +322,7 @@ function contextText() {
     now: Date.now(),
     actionLoopElapsedMs: actionLoopElapsedMs(),
     defaultActionLoopBudgetMinutes: DEFAULT_ACTION_LOOP_BUDGET_MINUTES,
+    identityCore: state.identityCoreRequested ? activeIdentityCore : null,
   });
 }
 
@@ -914,7 +918,7 @@ function providerRequest(frame) {
   const messages = [
     { role: "system", content: SYSTEM_PROMPT },
     { role: "user", content: [
-      { type: "text", text: `截图尺寸 ${frame.width}x${frame.height} 像素；坐标原点为整张截图左上角，归一化 x=屏幕像素x/截图宽度、y=屏幕像素y/截图高度；input 坐标必须落在可见输入框矩形中央，不能落在键盘区域。${contextText()}\n结合当前截图、用户目标和完整操作进展自行决定下一步。对“最新/是否存在/条件是否满足”作判断时，确认截图中的目标区域完整且未被键盘、菜单、弹窗遮挡；若目标列表可能还有未显示的较新内容，先滚动到最新位置或关闭遮挡并重新截图。你负责判断目标是否完成；完成时输出 done，并用 evidence 简要记录你的自我判断依据，系统会按原样保存，不做二次验收。动作坐标使用 0 到 1 的归一化坐标，input 必须提供截图中目标输入框中心的 x/y。等待模型期间菜单或布局可能变化，所有动作和坐标都必须依据本轮截图，菜单已消失时先重新观察。若当前截图识别出具体对象，且任务需要其历史背景但尚无对应 Memory，可请求精确对象范围的补充上下文：只返回 state=context、截图证据和 contextRequest.memoryObjectRefs；不得猜测对象名称，也不得同时请求记忆并给动作。每次最多请求 8 个范围，已查询范围不要重复请求；HO 查询后会重新截图。若存在上一步待核实操作，说明你对其结果的判断：verified、not-executed 或 unknown。格式：{"state":"action|context|wait|ask|done|stop","evidence":"你的进展、决定或完成判断依据","operationResult":"verified|not-executed|unknown","contextRequest":{"memoryObjectRefs":["contact:准确名称"]},"action":{"type":"tap|swipe|input|back|home","target":"目标","label":"按钮文字","x":0,"y":0,"fromX":0,"fromY":0,"toX":0,"toY":0,"durationMs":400,"text":"输入文本","mode":"replace","focused":true,"effect":"none|send|submit|publish|friend-add|external","visibleTarget":"截图中的对象","visibleContent":"截图中的完整正文"},"waitMs":5000,"question":"","reason":""}` },
+      { type: "text", text: `截图尺寸 ${frame.width}x${frame.height} 像素；坐标原点为整张截图左上角，归一化 x=屏幕像素x/截图宽度、y=屏幕像素y/截图高度；input 坐标必须落在可见输入框矩形中央，不能落在键盘区域。${contextText()}\n结合当前截图、用户目标和完整操作进展自行决定下一步。对“最新/是否存在/条件是否满足”作判断时，确认截图中的目标区域完整且未被键盘、菜单、弹窗遮挡；若目标列表可能还有未显示的较新内容，先滚动到最新位置或关闭遮挡并重新截图。你负责判断目标是否完成；完成时输出 done，并用 evidence 简要记录你的自我判断依据，系统会按原样保存，不做二次验收。动作坐标使用 0 到 1 的归一化坐标，input 必须提供截图中目标输入框中心的 x/y。等待模型期间菜单或布局可能变化，所有动作和坐标都必须依据本轮截图，菜单已消失时先重新观察。若任务需要角色或表达偏好，可请求 Identity Core；若可见对象的历史信息相关，可同时请求精确对象 Memory。只返回 state=context、截图证据和 contextRequest，不得猜测对象名称，也不得同时请求上下文并给动作。每次最多请求 8 个对象范围，重复范围不查询；Identity Core 每个 OST 最多请求一次，HO 查询后会重新截图。若存在上一步待核实操作，说明你对其结果的判断：verified、not-executed 或 unknown。格式：{"state":"action|context|wait|ask|done|stop","evidence":"你的进展、决定或完成判断依据","operationResult":"verified|not-executed|unknown","contextRequest":{"memoryObjectRefs":["contact:准确名称"],"includeIdentityCore":true},"action":{"type":"tap|swipe|input|back|home","target":"目标","label":"按钮文字","x":0,"y":0,"fromX":0,"fromY":0,"toX":0,"toY":0,"durationMs":400,"text":"输入文本","mode":"replace","focused":true,"effect":"none|send|submit|publish|friend-add|external","visibleTarget":"截图中的对象","visibleContent":"截图中的完整正文"},"waitMs":5000,"question":"","reason":""}` },
       { type: "image_url", image_url: { url: `data:${frame.mime || "image/jpeg"};base64,${frame.dataBase64}` } },
     ] },
   ];
@@ -935,12 +939,19 @@ function parseDecision(text) {
     throw new Error("模型需要记录自己对上一步操作结果的判断");
   }
   if (decision.state === "context") {
-    const rawRefs = decision.contextRequest?.memoryObjectRefs;
-    if (!Array.isArray(rawRefs) || rawRefs.length < 1 || rawRefs.length > 8 ||
-        rawRefs.some(value => typeof value !== "string" || !value.trim() || value.trim().length > 120)) {
-      throw new Error("对象记忆请求必须包含 1 到 8 个有效 objectRef");
+    const request = decision.contextRequest;
+    const rawRefs = request?.memoryObjectRefs === undefined ? [] : request.memoryObjectRefs;
+    const includeIdentityCore = request?.includeIdentityCore === true;
+    if (!request || !Array.isArray(rawRefs) || rawRefs.length > 8 ||
+        rawRefs.some(value => typeof value !== "string" || !value.trim() || value.trim().length > 120) ||
+        (request.includeIdentityCore !== undefined && typeof request.includeIdentityCore !== "boolean") ||
+        (!rawRefs.length && !includeIdentityCore)) {
+      throw new Error("补充上下文请求必须包含有效 objectRef 或 Identity Core 请求");
     }
-    decision.contextRequest = { memoryObjectRefs: [...new Set(rawRefs.map(value => value.trim()))] };
+    decision.contextRequest = {
+      memoryObjectRefs: [...new Set(rawRefs.map(value => value.trim()))],
+      includeIdentityCore,
+    };
   } else if (decision.contextRequest !== undefined) {
     throw new Error("只有 context 决策可以请求补充记忆");
   }
@@ -964,43 +975,75 @@ function settleContextOperation(decision, operations) {
   if (operation) operations.push(record("operations", `o:${operation.operationId}`, operation));
 }
 
-function requestMemoryContext(decision) {
+function requestSupplementalContext(decision) {
   const requestedRefs = decision.contextRequest.memoryObjectRefs;
   const previouslyQueried = new Set(Array.isArray(state.memoryLookupRefs) ? state.memoryLookupRefs : []);
   const available = Math.max(0, 8 - previouslyQueried.size);
   const newRefs = requestedRefs.filter(ref => !previouslyQueried.has(ref)).slice(0, available);
+  const includeIdentityCore = decision.contextRequest.includeIdentityCore && state.identityCoreRequested !== true;
   const operations = [];
   settleContextOperation(decision, operations);
 
   state.revision = Number(state.revision || 0) + 1;
-  if (!newRefs.length) {
-    state.memoryLookupNotice = "这些对象记忆范围已查询过，或本次 OST 已达到 8 个不同对象范围的查询上限；请依据当前可见证据继续。";
-    appendTrace("memory.context-query-limited", { requestedCount: requestedRefs.length, searchedCount: previouslyQueried.size });
+  if (!newRefs.length && !includeIdentityCore) {
+    state.memoryLookupNotice = "这些对象范围已查询过，或本次 OST 已达到 8 个范围的查询上限；请依据当前证据继续。";
+    state.identityCoreLookupNotice = "Identity Core 已在本 OST 查询过；继续使用已加载版本。";
+    appendTrace("context.query-limited", { requestedCount: requestedRefs.length, searchedCount: previouslyQueried.size,
+      identityCoreAlreadyLoaded: decision.contextRequest.includeIdentityCore && state.identityCoreRequested === true });
     operations.push(...updateGoalAndTask(decision));
-    pending = "memory-context-repeat-saved";
+    pending = "context-repeat-saved";
     return action("data.batch", { operations });
   }
 
   state.memoryLookupRefs = [...previouslyQueried, ...newRefs];
-  state.pendingMemoryRequest = { objectRefs: newRefs, requestedAt: Date.now() };
-  state.memoryLookupNotice = "正在按截图中识别的对象查找相关记忆。";
-  appendTrace("memory.context-requested", { objectCount: newRefs.length, evidence: decision.evidence });
+  if (includeIdentityCore) state.identityCoreRequested = true;
+  state.pendingContextRequest = { objectRefs: newRefs, includeIdentityCore, requestedAt: Date.now() };
+  state.memoryLookupNotice = newRefs.length ? "正在按截图中识别的对象查找相关记忆。" : state.memoryLookupNotice || "";
+  appendTrace("context.requested", { memoryObjectCount: newRefs.length, includeIdentityCore, evidence: decision.evidence });
   operations.push(...updateGoalAndTask(decision));
-  pending = "memory-context-request-saved";
+  pending = "context-request-saved";
   return action("data.batch", { operations });
 }
 
 function finishMemoryContextScan(items) {
-  const request = state.pendingMemoryRequest;
+  const request = state.pendingContextRequest;
   const requestedRefs = Array.isArray(request?.objectRefs) ? request.objectRefs : [];
   const matches = retrieveMemoriesForObjects(requestedRefs, Array.isArray(items) ? items : [], { limit: 5 });
   const merged = new Map((Array.isArray(state.memories) ? state.memories : []).map(item => [item.id, item]));
   for (const item of matches) merged.set(item.id, item);
   state.memories = [...merged.values()].slice(-5);
-  state.pendingMemoryRequest = null;
   state.memoryLookupNotice = `对象记忆检索已完成：查询 ${requestedRefs.length} 个范围，找到 ${matches.length} 条相关记忆。`;
   appendTrace("memory.context-loaded", { requestedCount: requestedRefs.length, memoryCount: matches.length });
+  if (request?.includeIdentityCore || (state.identityCoreRequested && !identityCoreLoaded)) {
+    pending = "identity-core-context-get";
+    return action("data.get", { collection: "self-model", key: "identity-core" });
+  }
+  state.pendingContextRequest = null;
   return persist("memory-context-result-saved");
+}
+
+function finishIdentityCoreRead(result) {
+  const record = normalizeIdentityCoreRecord(result?.value);
+  activeIdentityCore = record || { content: DEFAULT_IDENTITY_CORE, version: 0 };
+  identityCoreLoaded = true;
+  if (state.pendingContextRequest) {
+    const wasRequested = state.pendingContextRequest.includeIdentityCore === true;
+    state.identityCoreLookupNotice = record
+      ? `${wasRequested ? "已载入" : "Worker 恢复时重新载入"}用户 Identity Core 第 ${record.version} 版。`
+      : `${wasRequested ? "尚无用户修订，已载入" : "Worker 恢复时载入"}包内初始 Identity Core。`;
+    state.pendingContextRequest = null;
+    appendTrace(wasRequested ? "identity-core.context-loaded" : "identity-core.context-restored",
+      { version: activeIdentityCore.version, source: record ? "user" : "default" });
+    return persist("identity-core-context-saved");
+  }
+  if (state.identityCoreRequested) {
+    state.identityCoreLookupNotice = record
+      ? `Worker 恢复时重新载入用户 Identity Core 第 ${record.version} 版。`
+      : "Worker 恢复时载入包内初始 Identity Core。";
+    appendTrace("identity-core.context-restored", { version: activeIdentityCore.version, source: record ? "user" : "default" });
+  }
+  pending = "tool-candidate-scan";
+  return action("data.scan", { collection: "knowledge", prefix: "tool-candidate:", limit: 100 });
 }
 
 function parseJsonObject(text, purpose) {
@@ -1699,6 +1742,10 @@ function advanceAfterTool(event) {
     }
     case "load-active": {
       state = result?.value || null;
+      if (state?.pendingMemoryRequest && !state.pendingContextRequest) {
+        state.pendingContextRequest = { ...state.pendingMemoryRequest, includeIdentityCore: false };
+        delete state.pendingMemoryRequest;
+      }
       if (state && !state.actionLoop && state.loop) state.actionLoop = state.loop;
       if (state) delete state.loop;
       if (!state || terminal(state.state)) {
@@ -1729,7 +1776,7 @@ function advanceAfterTool(event) {
       state.memories = retrieveRelevantMemories(state.intent, result?.items || [], { limit: 5 });
       state.memoryLookupRefs = [...new Set([...(Array.isArray(state.memoryLookupRefs) ? state.memoryLookupRefs : []),
         ...state.memories.flatMap(item => item.objectRefs || [])])].slice(0, 8);
-      if (state.pendingMemoryRequest?.objectRefs?.length) return finishMemoryContextScan(result?.items || []);
+      if (state.pendingContextRequest?.objectRefs?.length) return finishMemoryContextScan(result?.items || []);
       pending = "behavior-pattern-scan";
       return action("data.scan", { collection: "self-model", prefix: "bp:", limit: 100 });
     }
@@ -1739,21 +1786,34 @@ function advanceAfterTool(event) {
         const match = state.pendingEventMatch;
         return requestEventMatch(match.event, match.eventTask, { key: match.inboxKey, revision: match.inboxRevision });
       }
+      if (state.identityCoreRequested || state.pendingContextRequest?.includeIdentityCore) {
+        pending = "identity-core-get";
+        return action("data.get", { collection: "self-model", key: "identity-core" });
+      }
       pending = "tool-candidate-scan";
       return action("data.scan", { collection: "knowledge", prefix: "tool-candidate:", limit: 100 });
     }
+    case "identity-core-get": return finishIdentityCoreRead(result);
     case "tool-candidate-scan": {
       state.toolCandidates = retrieveRelevantToolCandidates(state.intent, result?.items || [], { limit: 3 });
       const receiptRecovery = recoverPreparedGlobalAction();
       if (receiptRecovery) return receiptRecovery;
       return beginObserve();
     }
-    case "memory-context-request-saved": {
-      pending = "memory-context-scan";
-      return action("data.scan", { collection: "knowledge", prefix: "memory:", limit: 100 });
+    case "context-request-saved": {
+      if (state.pendingContextRequest?.objectRefs?.length) {
+        pending = "memory-context-scan";
+        return action("data.scan", { collection: "knowledge", prefix: "memory:", limit: 100 });
+      }
+      if (state.pendingContextRequest?.includeIdentityCore) {
+        pending = "identity-core-context-get";
+        return action("data.get", { collection: "self-model", key: "identity-core" });
+      }
+      return beginObserve();
     }
     case "memory-context-scan": return finishMemoryContextScan(result?.items || []);
-    case "memory-context-result-saved": case "memory-context-repeat-saved": return beginObserve();
+    case "identity-core-context-get": return finishIdentityCoreRead(result);
+    case "memory-context-result-saved": case "identity-core-context-saved": case "context-repeat-saved": return beginObserve();
     case "loop-review-capture": {
       if (!result?.dataBase64 || result.dataBase64.length > 600_000) throw new Error("超时复盘截图为空或超出后台事件限制");
       return requestActionLoopReview(result);
@@ -1959,6 +2019,8 @@ globalThis.onHaminnEvent = event => {
       return persist("tick-saved");
     }
     if (event?.type === "start") {
+      activeIdentityCore = { content: DEFAULT_IDENTITY_CORE, version: 0 };
+      identityCoreLoaded = false;
       pending = "load-active";
       return action("data.get", { collection: COLLECTION, key: ACTIVE_KEY });
     }

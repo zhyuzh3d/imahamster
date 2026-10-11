@@ -107,6 +107,10 @@ h2 { margin: 0; font-size: 17px; }
 .bp-fields { display: grid; gap: 8px; }
 .bp-field { display: grid; gap: 4px; color: var(--muted); font-size: 10px; }
 .bp-editor { width: 100%; min-height: 56px; padding: 8px; border: 1px solid var(--line); border-radius: 8px; background: white; color: var(--ink); font: inherit; font-size: 12px; resize: vertical; }
+.ic-meta { margin: 8px 0; color: var(--muted); font-size: 10px; }
+.ic-content { color: #38465d; font-size: 12px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
+.ic-editor { width: 100%; min-height: 180px; padding: 9px; border: 1px solid var(--line); border-radius: 9px; background: white; color: var(--ink); font: inherit; font-size: 12px; line-height: 1.55; resize: vertical; }
+.ic-actions { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 9px; }
 
 @media (max-width: 370px) {
   .page { padding-right: 14px; padding-left: 14px; }

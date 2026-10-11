@@ -22,7 +22,8 @@ test("CAE assembles a bounded action context without mutating the OST", () => {
   };
   const before = structuredClone(state);
 
-  const context = buildActionContext(state, { now: 5 * 60_000, actionLoopElapsedMs: 120_000 });
+  const context = buildActionContext(state, { now: 5 * 60_000, actionLoopElapsedMs: 120_000,
+    identityCore: { content: "我的表达偏好", version: 4 } });
 
   assert.match(context, /OST 硬时限剩余 5 分钟/);
   assert.match(context, /当前 AL 2，已用 2 分钟/);
@@ -37,6 +38,8 @@ test("CAE assembles a bounded action context without mutating the OST", () => {
   assert.match(context, /模式 0/);
   assert.doesNotMatch(context, /模式 5/);
   assert.match(context, /候选 0/);
+  assert.match(context, /Identity Core（版本 4/);
+  assert.match(context, /我的表达偏好/);
   assert.doesNotMatch(context, /候选 3/);
   assert.match(context, /仅是历史参考文本/);
   assert.doesNotMatch(context, /phase-0\"/);
@@ -53,6 +56,7 @@ test("CAE represents missing experience and action history explicitly", () => {
   assert.match(context, /近期操作记录：\[\]/);
   assert.doesNotMatch(context, /此前 AL 记录：/);
   assert.match(context, /OST 硬时限剩余 1 分钟/);
+  assert.doesNotMatch(context, /用户编辑的 Identity Core/);
 });
 
 test("CAE rejects absent runtime state instead of silently assembling empty context", () => {

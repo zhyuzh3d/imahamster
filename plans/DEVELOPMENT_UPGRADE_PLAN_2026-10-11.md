@@ -520,6 +520,12 @@ JS 测试适合纯状态与组装；QuickJS/Android 仪器测试负责真实模�
 - 按现有 BP 合同新增独立管理模块 `ui/behavior-patterns.mjs`，只读取 `self-model` 集合内 `bp:` 记录；支持分页查看、编辑标题/适用情境/行为建议/来源依据、启用/停用和二次确认删除。所有写入使用 Haminn Bridge revision 做 CAS，编辑与状态切换保留 `sourceGoalId` 和创建时间；停用状态不会进入 `retrieveBehaviorPatterns` 的动作上下文。
 - `ui/self-model.mjs` 组合 BP 和 Memory 管理模块，主页面只负责挂载；新增表单合同测试覆盖来源保留、字段限制和停用/恢复状态。当前 BP 仅支持全局范围，没有按应用/对象分类；通用工具候选仍未有用户管理界面。真机 ADB 与行为验收待调试授权恢复。
 
+### 10.26 用户可编辑 Identity Core 与按需载入（2026-10-11）
+
+- 设计文档要求 IC 是包内初始文档、实例级用户副本，并且仅由用户明确编辑。此前代码把 IC 编译进 SYSTEM_PROMPT，虽不可被学习改写，但没有实例副本或用户编辑入口，且无法按任务选择是否加入上下文。
+- 新增 `self-model:identity-core` 的 schema、长度限制和递增版本；Persona UI 支持读取默认/用户版本、明确编辑与 CAS 保存。静态执行策略保留在 SYSTEM_PROMPT，用户 IC 以低优先级参考数据组装，不可扩大授权。LLM 可在截图判断任务需要角色表达时请求 IC；HO 限制每个 OST 仅查询一次，记录版本和来源，Worker 重启后恢复该上下文。
+- CAE 测试确认仅显式请求时包含 IC，Worker 集成测试覆盖 IC 与精确对象 Memory 联合查询、查询中断后的恢复和重复请求限制。BP、Memory、IC 仍需真机渲染、用户编辑与下一 OST 上下文证据；U3/U5 与设备验收未完成。
+
 ## 11. 交付与完成判定
 
 ImHamster 与 Haminn 独立提交、验证和推送；每次提交前核对各自 Git 根与 origin，保留无关工作区改动。宿主新增合同需同步 SDK/能力文档/实际实现，消费者只接入确实支持的能力。

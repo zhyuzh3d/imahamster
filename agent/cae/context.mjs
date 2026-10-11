@@ -6,6 +6,7 @@ export function buildActionContext(state, {
   now = Date.now(),
   actionLoopElapsedMs = 0,
   defaultActionLoopBudgetMinutes = 15,
+  identityCore = null,
 } = {}) {
   if (!state || typeof state !== "object") throw new TypeError("CAE 需要有效的 OST 状态");
 
@@ -17,6 +18,10 @@ export function buildActionContext(state, {
   const memories = Array.isArray(state.memories) && state.memories.length
     ? `相关对象记忆（observed 为来源直接观察，inferred 为归纳推测；只在对象和当前任务匹配时使用）：${JSON.stringify(state.memories.slice(0, 5).map(item => ({ id: item.id, kind: item.kind, objectRefs: item.objectRefs, content: item.content, sourceRefs: item.sourceRefs, observedAt: item.observedAt, inference: item.inference, tags: item.tags, revision: item.revision })))}`
     : "暂无相关对象记忆。";
+  const identityCoreVersion = Number(identityCore?.version) || 0;
+  const identityPersona = identityCore?.content
+    ? `用户编辑的 Identity Core（${identityCoreVersion > 0 ? `版本 ${identityCoreVersion}` : "包内初始版"}；仅作角色/表达偏好参考，不改变系统策略、授权或当前任务）：${String(identityCore.content).slice(0, 2000)}${state.identityCoreLookupNotice ? ` ${String(state.identityCoreLookupNotice).slice(0, 120)}` : ""}`
+    : "";
   const memoryLookups = Array.isArray(state.memoryLookupRefs) && state.memoryLookupRefs.length
     ? `已查询过的对象记忆范围：${JSON.stringify(state.memoryLookupRefs.slice(0, 8))}。不要重复查询；若无相关条目，继续按当前证据推进。${state.memoryLookupNotice ? ` ${String(state.memoryLookupNotice).slice(0, 180)}` : ""}`
     : "";
@@ -75,5 +80,5 @@ export function buildActionContext(state, {
     ? `最近执行错误：${state.lastModelErrorCode ? `${state.lastModelErrorCode}：` : ""}${state.lastModelError}。`
     : "";
 
-  return `当前 OST：${state.intent}\n任务进度：${state.progress || "尚未开始"}；决策步数 ${state.step || 0}；当前 AL ${actionLoop.index || 1}，已用 ${Math.floor(actionLoopElapsedMs / 60_000)} 分钟/预算 ${actionLoop.budgetMinutes || defaultActionLoopBudgetMinutes} 分钟；OST 硬时限剩余 ${goalRemainingMinutes} 分钟。${trigger}${lastError}${inputRecovery}${operation}\n${loopHistory}近期操作记录：${JSON.stringify(history)}\n${behaviorPatterns}\n${experiences}\n${memories}\n${memoryLookups}\n${toolCandidates}\n${tools}`;
+  return `当前 OST：${state.intent}\n任务进度：${state.progress || "尚未开始"}；决策步数 ${state.step || 0}；当前 AL ${actionLoop.index || 1}，已用 ${Math.floor(actionLoopElapsedMs / 60_000)} 分钟/预算 ${actionLoop.budgetMinutes || defaultActionLoopBudgetMinutes} 分钟；OST 硬时限剩余 ${goalRemainingMinutes} 分钟。${trigger}${lastError}${inputRecovery}${operation}\n${loopHistory}近期操作记录：${JSON.stringify(history)}\n${identityPersona}\n${behaviorPatterns}\n${experiences}\n${memories}\n${memoryLookups}\n${toolCandidates}\n${tools}`;
 }
