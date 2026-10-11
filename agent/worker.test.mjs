@@ -1445,7 +1445,7 @@ test("malformed actions recover and the LLM completion judgment is stored withou
   assert.ok(active.trace.some((event) => event.phase === "recovery.scheduled" && event.mode === "backoff"));
 });
 
-test("retryable runtime bridge failures reobserve through the LLM instead of becoming a synthetic stop", () => {
+test("retryable runtime bridge failures survive Worker restart and reobserve through the LLM", async () => {
   const records = new Map();
   const provider = { baseUrl: "https://model.example", apiKey: "x".repeat(24), model: "vision-model" };
   const prompts = [];
@@ -1500,7 +1500,8 @@ test("retryable runtime bridge failures reobserve through the LLM instead of bec
   assert.equal(waitingState.recoverySignals.categories[0].stage, "knowledge-scan");
   assert.ok(waitingState.trace.some(event => event.phase === "recovery.scheduled" && event.mode === "runtime-reobserve"));
 
-  const completed = deliver({ type: "tick" });
+  await import(`./worker.mjs?recovery-restart=${Date.now()}`);
+  const completed = deliver({ type: "start" });
   const active = records.get("agent-runtime:active-goal").value;
   assert.equal(completed.state, "done");
   assert.equal(active.state, "done");
