@@ -1510,6 +1510,37 @@ test("retryable runtime bridge failures reobserve through the LLM instead of bec
   assert.equal(active.trace.some(event => event.phase === "decision" && event.decision === "stop"), false);
 });
 
+test("post-completion queue read errors do not reopen or fail the completed OST", () => {
+  const active = { goalId: "goal-finished", taskId: "task-finished", runId: "run-finished",
+    intent: "完成合成任务", state: "done", step: 2, revision: 4, progress: "LLM 已判断任务完成", trace: [] };
+  const records = new Map([[
+    "agent-runtime:active-goal", { value: active, revision: "1" },
+  ]]);
+
+  function tool(method, params) {
+    if (method === "data.get") return records.get(`${params.collection}:${params.key}`) || null;
+    if (method === "data.scan" && params.collection === "inbox" && params.prefix === "q:") {
+      throw Object.assign(new Error("synthetic queue store outage"), { code: "E_NETWORK", retryable: true });
+    }
+    throw new Error(`Unexpected tool: ${method}`);
+  }
+
+  const call = globalThis.onHaminnEvent({ type: "start" });
+  const loaded = globalThis.onHaminnEvent({ type: "tool.result", callId: call.actions[0].callId, ok: true,
+    result: tool(call.actions[0].method, call.actions[0].params) });
+  assert.equal(loaded.state, "done");
+  const scanResult = globalThis.onHaminnEvent({ type: "tick" });
+  const scan = scanResult.actions?.[0];
+  assert.equal(scan?.method, "data.scan");
+  const final = globalThis.onHaminnEvent({ type: "tool.result", callId: scan.callId, ok: false,
+    error: { code: "E_NETWORK", retryable: true, message: "synthetic queue store outage" } });
+
+  assert.equal(final.state, "done");
+  assert.equal(final.postTaskError, true);
+  assert.equal(records.get("agent-runtime:active-goal").value.state, "done");
+  assert.equal(final.actions, undefined, "a queue bookkeeping fault must not restart the completed task");
+});
+
 test("recovery gives the model pending operation details and does not replay an unknown effect", () => {
   const records = new Map();
   const intendedContent = "synthetic recovery text ".repeat(70);

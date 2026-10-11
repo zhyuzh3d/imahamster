@@ -2211,6 +2211,16 @@ globalThis.onHaminnEvent = event => {
         if (state.pendingOperation) operations.unshift(record("operations", `o:${state.pendingOperation.operationId}`, state.pendingOperation));
         return action("data.batch", { operations });
       }
+      if (terminal(state.state)) {
+        const signal = recordRecoveryFailure(state, {
+          stage: pending,
+          category: error?.category || "post-task-runtime",
+          code: errorCode || undefined,
+        });
+        appendTrace("recovery.failure-recorded", signal);
+        return { state: state.state, progress: state.progress, postTaskError: true,
+          retryable: error?.retryable !== false, error: reason };
+      }
       if (state.pendingOperationId && state.pendingOperation) {
         state.pendingOperation.status = "unknown";
         state.pendingOperation.error = reason;
