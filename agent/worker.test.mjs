@@ -1511,35 +1511,164 @@ test("retryable runtime bridge failures survive Worker restart and reobserve thr
   assert.equal(active.trace.some(event => event.phase === "decision" && event.decision === "stop"), false);
 });
 
-test("post-completion queue read errors do not reopen or fail the completed OST", () => {
+test("post-completion queue read errors are logged and retried without reopening the completed OST", async () => {
+  await import(`./worker.mjs?post-task-queue-recovery=${Date.now()}`);
   const active = { goalId: "goal-finished", taskId: "task-finished", runId: "run-finished",
     intent: "完成合成任务", state: "done", step: 2, revision: 4, progress: "LLM 已判断任务完成", trace: [] };
   const records = new Map([[
     "agent-runtime:active-goal", { value: active, revision: "1" },
   ]]);
+  let failedQueueReads = 1;
 
   function tool(method, params) {
     if (method === "data.get") return records.get(`${params.collection}:${params.key}`) || null;
     if (method === "data.scan" && params.collection === "inbox" && params.prefix === "q:") {
-      throw Object.assign(new Error("synthetic queue store outage"), { code: "E_NETWORK", retryable: true });
+      if (failedQueueReads-- > 0) {
+        throw Object.assign(new Error("synthetic queue store outage"), { code: "E_NETWORK", retryable: true });
+      }
+      return { items: [] };
     }
+    if (method === "data.scan") return { items: [] };
+    if (method === "data.put") {
+      records.set(`${params.collection}:${params.key}`, { value: params.value, revision: "2" });
+      return { revision: "2" };
+    }
+    if (method === "data.batch") {
+      for (const operation of params.operations) records.set(`${operation.collection}:${operation.key}`,
+        { value: operation.value, revision: "2" });
+      return { results: [] };
+    }
+    if (method === "worker.wait") return { waitedMs: params.ms };
     throw new Error(`Unexpected tool: ${method}`);
   }
 
-  const call = globalThis.onHaminnEvent({ type: "start" });
-  const loaded = globalThis.onHaminnEvent({ type: "tool.result", callId: call.actions[0].callId, ok: true,
-    result: tool(call.actions[0].method, call.actions[0].params) });
-  assert.equal(loaded.state, "done");
-  const scanResult = globalThis.onHaminnEvent({ type: "tick" });
-  const scan = scanResult.actions?.[0];
-  assert.equal(scan?.method, "data.scan");
-  const final = globalThis.onHaminnEvent({ type: "tool.result", callId: scan.callId, ok: false,
-    error: { code: "E_NETWORK", retryable: true, message: "synthetic queue store outage" } });
+  function deliver(output) {
+    for (let turn = 0; output?.actions?.length && turn < 20; turn += 1) {
+      const call = output.actions[0];
+      try {
+        output = globalThis.onHaminnEvent({ type: "tool.result", callId: call.callId,
+          ok: true, result: tool(call.method, call.params) });
+      } catch (error) {
+        output = globalThis.onHaminnEvent({ type: "tool.result", callId: call.callId, ok: false,
+          error: { code: error.code, retryable: error.retryable, message: error.message } });
+      }
+    }
+    return output;
+  }
 
-  assert.equal(final.state, "done");
-  assert.equal(final.postTaskError, true);
-  assert.equal(records.get("agent-runtime:active-goal").value.state, "done");
-  assert.equal(final.actions, undefined, "a queue bookkeeping fault must not restart the completed task");
+  const loaded = deliver(globalThis.onHaminnEvent({ type: "start" }));
+  assert.equal(loaded.state, "done");
+  const afterFailure = deliver(globalThis.onHaminnEvent({ type: "tick" }));
+
+  assert.equal(afterFailure.state, "done");
+  assert.equal(afterFailure.postTaskRetryScheduled, true);
+  const savedAfterFailure = records.get("agent-runtime:active-goal").value;
+  assert.equal(savedAfterFailure.state, "done", "queue recovery must not reopen the completed OST");
+  assert.equal(savedAfterFailure.postTaskQueueRecovery.state, "retrying");
+  assert.equal(savedAfterFailure.postTaskQueueRecovery.attempts, 1);
+  assert.ok(savedAfterFailure.trace.some(event => event.phase === "worker.queue-recovery-scheduled"));
+
+  const afterRetry = deliver(globalThis.onHaminnEvent({ type: "tick" }));
+  const savedAfterRetry = records.get("agent-runtime:active-goal").value;
+  assert.equal(afterRetry.state, "done");
+  assert.equal(savedAfterRetry.state, "done");
+  assert.equal(savedAfterRetry.postTaskQueueRecovery.state, "recovered");
+  assert.equal(savedAfterRetry.postTaskQueueRecovery.attempts, 0);
+  assert.ok(savedAfterRetry.trace.some(event => event.phase === "worker.queue-recovery-succeeded"));
+});
+
+test("background queue recovery stops after bounded retries and restarts without changing the completed OST", async () => {
+  await import(`./worker.mjs?post-task-queue-exhaustion=${Date.now()}`);
+  const active = { goalId: "goal-finished-retries", taskId: "task-finished-retries", runId: "run-finished-retries",
+    intent: "完成合成任务", state: "done", step: 2, revision: 4, progress: "LLM 已判断任务完成", trace: [] };
+  const records = new Map([[
+    "agent-runtime:active-goal", { value: active, revision: "1" },
+  ]]);
+  let failedQueueReads = 8;
+
+  function tool(method, params) {
+    if (method === "data.get") return records.get(`${params.collection}:${params.key}`) || null;
+    if (method === "data.scan" && params.collection === "inbox" && params.prefix === "q:" && failedQueueReads > 0) {
+      failedQueueReads -= 1;
+      throw Object.assign(new Error("synthetic queue store outage"), { code: "E_NETWORK", retryable: true });
+    }
+    if (method === "data.scan") return { items: [] };
+    if (method === "data.put") {
+      records.set(`${params.collection}:${params.key}`, { value: params.value, revision: "2" });
+      return { revision: "2" };
+    }
+    if (method === "data.batch") {
+      for (const operation of params.operations) records.set(`${operation.collection}:${operation.key}`,
+        { value: operation.value, revision: "2" });
+      return { results: [] };
+    }
+    if (method === "worker.wait") return { waitedMs: params.ms };
+    throw new Error(`Unexpected tool: ${method}`);
+  }
+
+  function deliver(output) {
+    for (let turn = 0; output?.actions?.length && turn < 20; turn += 1) {
+      const call = output.actions[0];
+      try {
+        output = globalThis.onHaminnEvent({ type: "tool.result", callId: call.callId,
+          ok: true, result: tool(call.method, call.params) });
+      } catch (error) {
+        output = globalThis.onHaminnEvent({ type: "tool.result", callId: call.callId, ok: false,
+          error: { code: error.code, retryable: error.retryable, message: error.message } });
+      }
+    }
+    return output;
+  }
+
+  assert.equal(deliver(globalThis.onHaminnEvent({ type: "start" })).state, "done");
+  let result;
+  for (let attempt = 1; attempt <= 8; attempt += 1) {
+    result = deliver(globalThis.onHaminnEvent({ type: "tick" }));
+    assert.equal(result.state, "done");
+    assert.equal(Boolean(result.userRequired), attempt === 8);
+  }
+  let saved = records.get("agent-runtime:active-goal").value;
+  assert.equal(saved.state, "done");
+  assert.equal(saved.postTaskQueueRecovery.state, "needs-user");
+  assert.equal(saved.postTaskQueueRecovery.attempts, 8);
+  assert.ok(saved.trace.some(event => event.phase === "worker.queue-recovery-needs-user"));
+
+  const restarted = deliver(globalThis.onHaminnEvent({ type: "start" }));
+  saved = records.get("agent-runtime:active-goal").value;
+  assert.equal(restarted.state, "done");
+  assert.equal(restarted.queueRecoveryRetry, true);
+  assert.equal(saved.state, "done");
+  assert.equal(saved.postTaskQueueRecovery.state, "retrying");
+  assert.equal(saved.postTaskQueueRecovery.attempts, 0);
+});
+
+test("restarting a completed Worker resets exhausted background queue recovery without changing the OST result", async () => {
+  await import(`./worker.mjs?post-task-queue-restart=${Date.now()}`);
+  const active = { goalId: "goal-finished-recovery", taskId: "task-finished-recovery", runId: "run-finished-recovery",
+    intent: "完成合成任务", state: "done", step: 2, revision: 4, progress: "LLM 已判断任务完成", trace: [],
+    postTaskQueueRecovery: { kind: "inbox-drain", state: "needs-user", attempts: 8, maxAttempts: 8,
+      userRequired: true, stage: "queue-read", error: "synthetic repeated storage outage" } };
+  const records = new Map([[
+    "agent-runtime:active-goal", { value: active, revision: "1" },
+  ]]);
+
+  const start = globalThis.onHaminnEvent({ type: "start" });
+  const loaded = globalThis.onHaminnEvent({ type: "tool.result", callId: start.actions[0].callId, ok: true,
+    result: records.get("agent-runtime:active-goal") });
+  assert.equal(loaded.actions[0].method, "data.batch");
+  for (const operation of loaded.actions[0].params.operations) records.set(`${operation.collection}:${operation.key}`,
+    { value: operation.value, revision: "2" });
+  const saved = globalThis.onHaminnEvent({ type: "tool.result", callId: loaded.actions[0].callId, ok: true,
+    result: { results: [] } });
+
+  assert.equal(saved.state, "done");
+  assert.equal(saved.startup, true);
+  const recovered = records.get("agent-runtime:active-goal").value;
+  assert.equal(recovered.state, "done");
+  assert.equal(recovered.postTaskQueueRecovery.state, "retrying");
+  assert.equal(recovered.postTaskQueueRecovery.userRequired, false);
+  assert.equal(recovered.postTaskQueueRecovery.attempts, 0);
+  assert.ok(recovered.trace.some(event => event.phase === "worker.queue-recovery-retry-requested"));
 });
 
 test("state write failure interrupts delivery without recursively retrying the same write", () => {

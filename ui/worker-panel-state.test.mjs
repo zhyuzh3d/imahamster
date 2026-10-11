@@ -47,3 +47,17 @@ test("a prior terminal goal cannot hide a newer handoff that failed before persi
   assert.equal(state.orphanedHandoff, true);
   assert.equal(state.resumeEnabled, true);
 });
+
+test("a completed OST exposes a separate retry control when background queue recovery is exhausted", () => {
+  const state = deriveWorkerPanelState({
+    activeRecord: { value: { state: "done", trace: [], postTaskQueueRecovery: {
+      kind: "inbox-drain", state: "needs-user", attempts: 8, userRequired: true,
+    } } },
+    serviceState: "running",
+  });
+
+  assert.equal(state.visible, true);
+  assert.equal(state.activeCanControl, false, "queue recovery must not reopen the completed OST");
+  assert.equal(state.queueRecoveryNeedsUser, true);
+  assert.equal(state.resumeEnabled, true);
+});

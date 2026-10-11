@@ -9,10 +9,13 @@ export function deriveWorkerPanelState({ activeRecord, queuedCount = 0, serviceS
   const interruptedHandoff = serviceState === "failed" && lastResult?.status === "running" &&
     (!persistedCurrentGoal || !TERMINAL_GOAL_STATES.has(active?.state));
   const orphanedHandoff = interruptedHandoff && !persistedCurrentGoal;
+  const queueRecoveryNeedsUser = active?.postTaskQueueRecovery?.kind === "inbox-drain" &&
+    active.postTaskQueueRecovery.userRequired === true;
   const visible = (!!active && !TERMINAL_GOAL_STATES.has(active.state)) || queuedCount > 0 ||
-    !!active?.trace?.length || liveEventTasks.length > 0 || interruptedHandoff;
+    !!active?.trace?.length || liveEventTasks.length > 0 || interruptedHandoff || queueRecoveryNeedsUser;
   const activeCanControl = !!active && !["done", "cancelled", "event-driven"].includes(active.state);
-  const resumeEnabled = orphanedHandoff || (activeCanControl &&
+  const resumeEnabled = orphanedHandoff || queueRecoveryNeedsUser || (activeCanControl &&
     (active.state === "paused" || active?.waiting?.userRequired || active.state === "failed" || serviceState !== "running"));
-  return { active, liveEventTasks, visible, interruptedHandoff, orphanedHandoff, persistedCurrentGoal, activeCanControl, resumeEnabled };
+  return { active, liveEventTasks, visible, interruptedHandoff, orphanedHandoff, persistedCurrentGoal,
+    queueRecoveryNeedsUser, activeCanControl, resumeEnabled };
 }

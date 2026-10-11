@@ -48,6 +48,7 @@ const ACTIVE_KEY = "active-goal";
 const EVENT_TASKS_COLLECTION = "event-tasks";
 const NOTIFICATION_INBOX_PREFIX = "n:";
 const MAX_RECOVERY_ATTEMPTS = 12;
+const MAX_POST_TASK_QUEUE_RECOVERY_ATTEMPTS = 8;
 const DEFAULT_ACTION_LOOP_BUDGET_MINUTES = 15;
 const MAX_ACTION_LOOP_BUDGET_MINUTES = 30;
 const MAX_GOAL_DURATION_MS = 30 * 60_000;
@@ -59,6 +60,12 @@ const GLOBAL_ACTION_RECEIPT_STAGES = new Set([
 const CRITICAL_STATE_READ_STAGES = new Set([
   "load-active", "goal-submit-receipt-read", "notification-receipt-read", "timer-receipt-read",
   "event-task-control-receipt-read", "event-task-control-task-read",
+]);
+const POST_TASK_QUEUE_READ_STAGES = new Set([
+  "queue-read", "completed-queue-read", "notification-read", "timer-read",
+]);
+const POST_TASK_QUEUE_RECOVERY_STAGES = new Set([
+  ...POST_TASK_QUEUE_READ_STAGES, "post-task-queue-recovery-wait-result",
 ]);
 
 
@@ -1625,6 +1632,23 @@ function advanceAfterTool(event) {
   if (state && !["unclassified", "event-match"].includes(state.taskType) && !terminal(state.state) && !["goal-time-limit-saved", "goal-submit-receipt-read"].includes(pending) && goalDeadlineExpired() &&
       !finishingGlobalActionReceipt && !GLOBAL_ACTION_RECEIPT_STAGES.has(pending)) return failExpiredGoal();
   const result = resultOf(event);
+  if (POST_TASK_QUEUE_READ_STAGES.has(pending) && state?.postTaskQueueRecovery?.kind === "inbox-drain" &&
+      state.postTaskQueueRecovery.state !== "recovered") {
+    const recovery = state.postTaskQueueRecovery;
+    state.postTaskQueueRecovery = {
+      ...recovery,
+      state: "recovered",
+      userRequired: false,
+      attempts: 0,
+      recoveredAt: Date.now(),
+    };
+    appendTrace("worker.queue-recovery-succeeded", {
+      previousAttempts: Number(recovery.attempts || 0), lastStage: recovery.stage,
+    });
+    state.revision = Number(state.revision || 0) + 1;
+    pending = "post-task-queue-recovery-cleared-saved";
+    return action("data.put", { collection: COLLECTION, key: ACTIVE_KEY, value: state });
+  }
   switch (pending) {
     case "create-goal":
       pending = "get-provider";
@@ -1805,6 +1829,16 @@ function advanceAfterTool(event) {
       }
       if (state && !state.actionLoop && state.loop) state.actionLoop = state.loop;
       if (state) delete state.loop;
+      if (state?.postTaskQueueRecovery?.userRequired) {
+        const previousAttempts = Number(state.postTaskQueueRecovery.attempts || 0);
+        state.postTaskQueueRecovery = { ...state.postTaskQueueRecovery,
+          state: "retrying", userRequired: false, attempts: 0, retryRequestedAt: Date.now() };
+        appendTrace("worker.queue-recovery-retry-requested", { previousAttempts });
+        state.revision = Number(state.revision || 0) + 1;
+        startupNeedsQueueDrain = true;
+        pending = "post-task-queue-recovery-retry-saved";
+        return action("data.put", { collection: COLLECTION, key: ACTIVE_KEY, value: state });
+      }
       if (!state || terminal(state.state)) {
         startupNeedsQueueDrain = true;
         return { state: state?.state || "idle", startup: true };
@@ -1977,6 +2011,23 @@ function advanceAfterTool(event) {
       pending = "queued-goal-created";
       return action("data.batch", { operations });
     }
+    case "post-task-queue-recovery-saved": {
+      const recovery = state?.postTaskQueueRecovery;
+      if (!recovery || recovery.userRequired) {
+        return { state: state?.state || "idle", progress: state?.progress,
+          postTaskError: true, userRequired: true, queueRecovery: recovery || null };
+      }
+      const delayMs = Math.min(300_000, 5_000 * 2 ** Math.max(0, Number(recovery.attempts || 1) - 1));
+      pending = "post-task-queue-recovery-wait-result";
+      return action("worker.wait", { ms: delayMs });
+    }
+    case "post-task-queue-recovery-wait-result":
+      return { state: state?.state || "idle", progress: state?.progress,
+        postTaskRetryScheduled: true, queueRecovery: state?.postTaskQueueRecovery || null };
+    case "post-task-queue-recovery-cleared-saved":
+      return readNextQueuedGoal();
+    case "post-task-queue-recovery-retry-saved":
+      return { state: state?.state || "idle", startup: true, queueRecoveryRetry: true };
     case "queued-goal-created":
       pending = "get-provider";
       return action("data.get", { collection: "screen-interaction", key: "provider" });
@@ -2229,6 +2280,31 @@ globalThis.onHaminnEvent = event => {
         return action("data.batch", { operations });
       }
       if (terminal(state.state)) {
+        if (POST_TASK_QUEUE_RECOVERY_STAGES.has(pending)) {
+          const previous = state.postTaskQueueRecovery?.kind === "inbox-drain" &&
+            state.postTaskQueueRecovery.state !== "recovered"
+            ? state.postTaskQueueRecovery : null;
+          const attempts = Number(previous?.attempts || 0) + 1;
+          const userRequired = error?.retryable === false || attempts >= MAX_POST_TASK_QUEUE_RECOVERY_ATTEMPTS;
+          state.postTaskQueueRecovery = {
+            kind: "inbox-drain",
+            state: userRequired ? "needs-user" : "retrying",
+            stage: pending,
+            attempts,
+            maxAttempts: MAX_POST_TASK_QUEUE_RECOVERY_ATTEMPTS,
+            userRequired,
+            code: errorCode || null,
+            error: reason,
+            updatedAt: Date.now(),
+          };
+          appendTrace(userRequired ? "worker.queue-recovery-needs-user" : "worker.queue-recovery-scheduled", {
+            stage: pending, attempt: attempts, maxAttempts: MAX_POST_TASK_QUEUE_RECOVERY_ATTEMPTS,
+            code: errorCode || null, message: reason,
+          });
+          state.revision = Number(state.revision || 0) + 1;
+          pending = "post-task-queue-recovery-saved";
+          return action("data.put", { collection: COLLECTION, key: ACTIVE_KEY, value: state });
+        }
         const signal = recordRecoveryFailure(state, {
           stage: pending,
           category: error?.category || "post-task-runtime",

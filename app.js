@@ -792,7 +792,8 @@
     if (!workerPanel) return;
     const { deriveWorkerPanelState } = await loadWorkerPanelStateModule();
     const panelState = deriveWorkerPanelState({ activeRecord, queuedCount, serviceState, lastResult, eventTasks });
-    const { active, liveEventTasks, visible, interruptedHandoff, orphanedHandoff, persistedCurrentGoal } = panelState;
+    const { active, liveEventTasks, visible, interruptedHandoff, orphanedHandoff, persistedCurrentGoal,
+      queueRecoveryNeedsUser } = panelState;
     const displayActive = interruptedHandoff && !persistedCurrentGoal ? null : active;
     workerPanel.hidden = !visible;
     if (!visible) return;
@@ -809,6 +810,11 @@
         : queuedCount && !displayActive ? `${queuedCount} 项排队` : workerStateLabel(stateValue, serviceState);
     const lines = [];
     if (interruptedHandoff) lines.push(`后台 Worker 已异常退出：${String(serviceError || "原因未报告").slice(0, 240)}。请先核对目标应用当前状态，再决定是否重试。`);
+    if (displayActive?.postTaskQueueRecovery?.kind === "inbox-drain" &&
+        displayActive.postTaskQueueRecovery.state !== "recovered") {
+      const recovery = displayActive.postTaskQueueRecovery;
+      lines.push(`后台事件队列恢复${recovery.userRequired ? "需要重试" : "自动重试中"}：${String(recovery.error || "存储读取失败").slice(0, 180)}（${recovery.attempts || 0}/${recovery.maxAttempts || 8}）`);
+    }
     if (displayActive?.intent) lines.push(displayActive.intent.slice(0, 180));
     const actionLoop = displayActive?.actionLoop || displayActive?.loop;
     if (actionLoop) lines.push(`AL ${actionLoop.index || 1}：预估 ${actionLoop.estimatedMinutes || "待定"} 分钟 / 预算 ${actionLoop.budgetMinutes || 15} 分钟`);
@@ -831,6 +837,8 @@
         "recovery.failure-recorded": "累计恢复故障",
         "action-loop.planning": "规划 AL", "loop.planning": "规划 AL", "action-loop.started": "AL 开始", "loop.started": "AL 开始", "action-loop.timeout": "AL 预算检查点", "loop.timeout": "AL 预算检查点", "action-loop.review": "LLM 复盘决定", "loop.review": "LLM 复盘决定",
         "goal.time-limit-exceeded": "目标超时停止", "goal.retry-attempt": "重新开始目标", "learning.review-complete": "经验整理完成", "learning.review-skipped": "跳过经验整理",
+        "worker.queue-recovery-scheduled": "安排后台队列恢复", "worker.queue-recovery-needs-user": "后台队列等待手工重试",
+        "worker.queue-recovery-succeeded": "后台队列恢复成功", "worker.queue-recovery-retry-requested": "重新启动后台恢复",
       };
       const events = Array.isArray(displayActive?.trace) ? displayActive.trace.slice(-8) : [];
       const detail = (event) => {
@@ -857,7 +865,8 @@
     const activeCanControl = !!displayActive && !["done", "cancelled", "event-driven"].includes(displayActive.state);
     workerPauseButton.disabled = busy || !activeCanControl || active.state === "paused";
     workerResumeButton.disabled = busy || !panelState.resumeEnabled;
-    workerResumeButton.textContent = orphanedHandoff || active?.state === "failed" || active?.waiting?.userRequired ? "检查后重试" : "继续";
+    workerResumeButton.textContent = queueRecoveryNeedsUser ? "重试后台恢复"
+      : orphanedHandoff || active?.state === "failed" || active?.waiting?.userRequired ? "检查后重试" : "继续";
     workerCancelButton.disabled = busy || (!activeCanControl && queuedCount === 0 && liveEventTasks.length === 0);
   }
 
@@ -1133,6 +1142,24 @@
         if (orphanedHandoff) active = null;
         if (!active && !orphanedHandoff) {
           throw new Error("没有可继续的后台任务。");
+        }
+        if (active?.postTaskQueueRecovery?.kind === "inbox-drain" &&
+            active.postTaskQueueRecovery.userRequired === true) {
+          const service = await haminn.workers.status();
+          if (service?.state === "running") await stopWorkerAndWait();
+          let started = await haminn.workers.start();
+          if (started?.state === "waiting-user") throw new Error("后台运行授权尚未授予；事件队列没有重试。");
+          const retryDeadline = Date.now() + 12_000;
+          while (started?.state !== "running" && Date.now() < retryDeadline) {
+            if (["failed", "stopped", "waiting-user"].includes(started?.state)) {
+              throw new Error(started.error || `后台 Worker 无法重启（${started.state}）。`);
+            }
+            await sleep(200);
+            started = await haminn.workers.status();
+          }
+          if (started?.state !== "running") throw new Error("后台 Worker 重启超时；已完成的单次目标状态保持不变。");
+          setMessage("后台事件队列已重新启动恢复；此前完成的单次目标仍保持完成。", "success");
+          return;
         }
         const reply = String(workerReplyInput?.value || "").trim().slice(0, 1200);
         const shouldDispatchResume = !!active && ["waiting", "paused", "failed"].includes(active.state);
