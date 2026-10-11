@@ -613,6 +613,13 @@ JS 测试适合纯状态与组装；QuickJS/Android 仪器测试负责真实模�
 - 对照实现后明确：`AgentStore` 目前使用 Promise 式直接数据 API，而 Haminn 生产 Worker 通过 effect/result 回合发起数据请求；当前 Worker 才是生产生命周期单写者，AgentStore 仍是未接线原型。不能仅在 Worker 中 `new AgentStore()` 就满足唯一 store。U0 的生产存储收敛仍未完成，需要先定义与现有 effect/result 生命周期兼容的 store 请求/响应合同，再渐进替换生产路径。该次抽取不关闭 U0。
 - 当前设备核验仍只枚举 `emulator-5554`；Haminn DEV `targetReady=false`、runtime `not-visible`。本次变化未获得真机模块加载或交互证据。
 
+### 10.40 建立 Worker 持久化写入适配边界并保留 CAS（2026-10-11）
+
+- 复核 Worker 与 `AgentStore` 的数据接口时发现，Worker 为将待写操作日志与业务状态原子提交，会把单条 `data.put` 改写为 `data.batch`；旧转换只复制集合、键和值，会丢弃调用者提供的 `expectedRevision`。因此，任何经过日志包装的 CAS 写入都可能退化为无条件写入，造成并发覆盖风险。
+- 新增 `agent/storage/journaled-write.mjs`，集中负责这种存储 effect 转换，并原样保留单条 put 与既有 batch 中每条操作的版本条件。生产 Worker 已改为经过该适配模块生成日志批次；它只处理 Haminn effect 请求形状，不承担 HO 生命周期或结果判断，也不把 Promise 式 `AgentStore` 接入 Worker。
+- 回归测试覆盖 put 的 CAS 保留、batch 内 put/delete 版本条件保留，以及没有日志时不改变调用形状。专项测试 3/3、全量 `node --test` 138/138 通过，Worker 与模块语法检查、`git diff --check` 通过。Haminn Host 的 `RecordsStore.batch()` 会在 SQLite transaction 内先校验每条 `expectedRevision` 再执行操作，`CapabilityKernel` 将其传到数据层，确认该批次合同确实支持原子 CAS。
+- 这只修复并验证了“日志包装会丢弃传入 CAS”的适配缺陷，不代表 Worker 已全面使用 CAS，也不关闭 U0。下一步仍需统一生产 Worker 与 UI 的生命周期写入权、版本读取/回写和冲突恢复合同；真机当前仍需复验。
+
 ## 11. 交付与完成判定
 
 ImHamster 与 Haminn 独立提交、验证和推送；每次提交前核对各自 Git 根与 origin，保留无关工作区改动。宿主新增合同需同步 SDK/能力文档/实际实现，消费者只接入确实支持的能力。

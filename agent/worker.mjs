@@ -12,7 +12,8 @@ import { toolRefForAction } from "./te/catalog.mjs";
 import { retrieveRelevantToolCandidates } from "./te/retrieval.mjs";
 import { retrieveRelevantToolRecipes } from "./te/recipe-retrieval.mjs";
 import { prepareLearningRecords } from "./learning/records.mjs";
-import { attachJournalEvents, makeJournalEntry } from "./observability/journal.mjs";
+import { makeJournalEntry } from "./observability/journal.mjs";
+import { prepareJournaledStoreWrite } from "./storage/journaled-write.mjs";
 import { validateScreenAction } from "./ho/decision.mjs";
 import { goalPlanFromRecord, goalProgressRecord, taskPlanFromRecord, taskProgressRecord } from "./ho/records.mjs";
 import {
@@ -184,16 +185,16 @@ function handleProviderResult(result) {
 
 function action(method, params = {}) {
   const callId = `${workerEpoch}:w${++callSequence}`;
-  if (state && journalPending.length && (method === "data.put" || method === "data.batch")) {
-    const operations = method === "data.put"
-      ? [{ op: "put", collection: params.collection, key: params.key, value: params.value }]
-      : params.operations;
-    const checkpointed = attachJournalEvents(state, operations, journalPending, { checkpointCollection: COLLECTION, checkpointKey: ACTIVE_KEY });
-    journalInFlight = journalPending;
+  const journaledWrite = prepareJournaledStoreWrite({
+    method, params, state, events: journalPending,
+    checkpointCollection: COLLECTION, checkpointKey: ACTIVE_KEY,
+  });
+  if (journaledWrite) {
+    journalInFlight = journaledWrite.committedEvents;
     journalPending = [];
     journalCommitCallId = callId;
-    method = "data.batch";
-    params = { operations: checkpointed };
+    method = journaledWrite.method;
+    params = journaledWrite.params;
   }
   const actionParams = { ...params };
   delete actionParams[HOST_DEADLINE_PARAMETER];
