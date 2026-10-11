@@ -606,6 +606,13 @@ JS 测试适合纯状态与组装；QuickJS/Android 仪器测试负责真实模�
 - LLM 可对单次动作附 `recipeUse`。HO 核实引用的配方当前存在、步骤索引有效且该步骤注册工具与动作类型一致，再把来源、修订和索引写入决策日志。此校验只保证引用与调用类型一致，不替 LLM 判断配方语义是否适用或任务是否成功。
 - 全量 `node --test` 133/133 通过，新增配方 schema、工具白名单、相关性检索、CAE 来源清单、学习保存与后续动作归因覆盖；`node --check`（Worker/CAE/UI/配方模块）与 `git diff --check` 通过。此时 `adb devices -l` 仍只显示 `emulator-5554`，Haminn DEV runtime 为 `not-visible`；本次只有本地自动化证据，工具页真机渲染、真实模型配方采用和微信结果尚未验收。
 
+### 10.39 将学习产物准备从 Worker 拆为纯模块（2026-10-11）
+
+- 为减少 Worker 中跨 ME/SM/TE 的领域记录组装，将成功任务后的候选产物生成移至 `agent/learning/records.mjs`。模块只接收 LLM 建议、完成 OST 和有限轨迹，返回待提交记录及跳过原因；不执行 Haminn IO、不改 IC，也不作语义成功判断。Worker 保留调度、日志和事务提交责任。
+- 测试覆盖 Memory/BP/experience/候选/recipe 的来源和工具白名单，以及单条配方无效时保留其他有效学习产物。全量 `node --test` 135/135 通过，Worker、学习模块语法检查和 `git diff --check` 通过。
+- 对照实现后明确：`AgentStore` 目前使用 Promise 式直接数据 API，而 Haminn 生产 Worker 通过 effect/result 回合发起数据请求；当前 Worker 才是生产生命周期单写者，AgentStore 仍是未接线原型。不能仅在 Worker 中 `new AgentStore()` 就满足唯一 store。U0 的生产存储收敛仍未完成，需要先定义与现有 effect/result 生命周期兼容的 store 请求/响应合同，再渐进替换生产路径。该次抽取不关闭 U0。
+- 当前设备核验仍只枚举 `emulator-5554`；Haminn DEV `targetReady=false`、runtime `not-visible`。本次变化未获得真机模块加载或交互证据。
+
 ## 11. 交付与完成判定
 
 ImHamster 与 Haminn 独立提交、验证和推送；每次提交前核对各自 Git 根与 origin，保留无关工作区改动。宿主新增合同需同步 SDK/能力文档/实际实现，消费者只接入确实支持的能力。

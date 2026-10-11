@@ -5,13 +5,13 @@ import { buildActionContext } from "./cae/context.mjs";
 import { SYSTEM_PROMPT } from "./cae/prompts.mjs";
 import { buildContextManifest } from "./cae/manifest.mjs";
 import { retrieveRelevantExperiences } from "./me/retrieval.mjs";
-import { memorySourceRef, normalizeMemorySuggestion, retrieveMemoriesForObjects, retrieveRelevantMemories } from "./me/memory.mjs";
-import { normalizeBehaviorPattern, retrieveBehaviorPatterns } from "./sm/behavior-patterns.mjs";
+import { memorySourceRef, retrieveMemoriesForObjects, retrieveRelevantMemories } from "./me/memory.mjs";
+import { retrieveBehaviorPatterns } from "./sm/behavior-patterns.mjs";
 import { DEFAULT_IDENTITY_CORE, normalizeIdentityCoreRecord } from "./sm/identity-core.mjs";
-import { isRegisteredTool, toolRefForAction } from "./te/catalog.mjs";
+import { toolRefForAction } from "./te/catalog.mjs";
 import { retrieveRelevantToolCandidates } from "./te/retrieval.mjs";
-import { normalizeToolRecipeRecord, prepareToolRecipeEdit } from "./te/recipe.mjs";
 import { retrieveRelevantToolRecipes } from "./te/recipe-retrieval.mjs";
+import { prepareLearningRecords } from "./learning/records.mjs";
 import { attachJournalEvents, makeJournalEntry } from "./observability/journal.mjs";
 import { validateScreenAction } from "./ho/decision.mjs";
 import { goalPlanFromRecord, goalProgressRecord, taskPlanFromRecord, taskProgressRecord } from "./ho/records.mjs";
@@ -1516,58 +1516,11 @@ function learningHistory() {
 
 function saveLearningSuggestion(suggestion) {
   try {
-    const operations = [];
-    const toolRefs = value => Array.isArray(value) ? value.filter(isRegisteredTool).slice(0, 8) : [];
-    if (suggestion.savePattern === true && suggestion.pattern && state.progress) {
-      const pattern = normalizeBehaviorPattern(suggestion.pattern, { sourceGoalId: state.goalId, at: Date.now() });
-      if (pattern) operations.push(record("self-model", `bp:${state.goalId}`, pattern));
-    }
-    if (suggestion.saveExperience === true && suggestion.experience && state.progress) {
-      const item = suggestion.experience;
-      const fields = [item.title, item.situation, item.approach, item.successEvidence];
-      if (fields.every(value => typeof value === "string" && value.trim() && value.length <= 800)) {
-        const value = { schemaVersion: 1, type: "experience", state: "active", title: item.title.trim(), situation: item.situation.trim(), approach: item.approach.trim(), successEvidence: item.successEvidence.trim(), toolRefs: toolRefs(item.toolRefs), sourceGoalId: state.goalId, revision: 1, createdAt: Date.now() };
-        operations.push(record("knowledge", `experience:${state.goalId}`, value));
-      }
-    }
-    if (suggestion.saveMemory === true && Array.isArray(suggestion.memories) && state.progress) {
-      const history = learningHistory();
-      const sourceTimes = Object.fromEntries(history.map(item => [item.sourceRef, Number(item.at) || 0]));
-      const allowedSourceRefs = new Set(Object.keys(sourceTimes).filter(Boolean));
-      suggestion.memories.slice(0, 3).forEach((item, index) => {
-        const value = normalizeMemorySuggestion(item, { goalId: state.goalId, allowedSourceRefs, sourceTimes, at: Date.now() });
-        if (!value) return;
-        value.id = `memory:${state.goalId}:${index + 1}`;
-        operations.push(record("knowledge", value.id, value));
-      });
-    }
-    if (suggestion.saveRecipe === true && suggestion.recipe && state.progress) {
-      try {
-        const item = suggestion.recipe;
-        const history = learningHistory();
-        const allowedSourceRefs = new Set(history.map(entry => entry.sourceRef).filter(Boolean));
-        const sourceRefs = Array.isArray(item.sourceRefs)
-          ? [...new Set(item.sourceRefs.filter(ref => typeof ref === "string" && allowedSourceRefs.has(ref)))].slice(0, 24)
-          : [];
-        if (!sourceRefs.length) throw new Error("配方没有引用有效任务轨迹来源");
-        const recipe = prepareToolRecipeEdit({ type: "tool-recipe", state: "active", revision: 0,
-          sourceGoalId: state.goalId, sourceRefs }, {
-          name: item.name, purpose: item.purpose, applicability: item.applicability, steps: item.steps,
-        }, Date.now());
-        const normalized = normalizeToolRecipeRecord({ value: recipe });
-        if (normalized && sourceRefs.length) operations.push(record("knowledge", `tool-recipe:${state.goalId}`, recipe));
-        else appendTrace("learning.tool-recipe-skipped", { reason: "配方缺少可追溯的任务轨迹" });
-      } catch (error) {
-        appendTrace("learning.tool-recipe-skipped", { reason: String(error?.message || error).slice(0, 180) });
-      }
-    }
-    if (suggestion.saveTool === true && suggestion.tool && state.progress) {
-      const item = suggestion.tool;
-      if (typeof item.name === "string" && item.name.trim().length <= 80 && typeof item.description === "string" && item.description.trim().length <= 800) {
-        const value = { schemaVersion: 1, type: "tool-candidate", state: "candidate", name: item.name.trim(), description: item.description.trim(), toolRefs: toolRefs(item.toolRefs), sourceGoalId: state.goalId, createdAt: Date.now() };
-        if (value.toolRefs.length) operations.push(record("knowledge", `tool-candidate:${state.goalId}`, value));
-      }
-    }
+    const prepared = prepareLearningRecords(suggestion, {
+      goalId: state.goalId, progress: state.progress, history: learningHistory(), now: Date.now(),
+    });
+    const operations = prepared.records.map(item => record(item.collection, item.key, item.value));
+    for (const reason of prepared.skipped) appendTrace("learning.item-skipped", { reason });
     state.learningStatus = "complete";
     state.learningSaved = operations.length;
     appendTrace("learning.review-complete", { saved: operations.length });
