@@ -25,9 +25,9 @@
 
 | 位置 | 已有实现 | 升级问题 |
 |---|---|---|
-| [agent/worker.mjs](../agent/worker.mjs) | 生产后台入口与 effect/result 状态机；串联 OST/EDT/AL、屏幕交互、CAE、学习与持久事件日志 | 仍是较大的生命周期协调器；后置学习仍挂在已完成用户 OST 的 Worker 流程上，尚未形成独立低优先级系统 EDT/维护 OST；拆分必须围绕稳定 effect/result 合同，不能再增加第二套运行路径 |
+| [agent/worker.mjs](../agent/worker.mjs) | 生产后台入口与 effect/result 状态机；串联 OST/EDT/AL、屏幕交互、CAE、学习与持久事件日志 | 仍是较大的生命周期协调器；成功后学习已通过确定性 outbox 和独立数据维护 OST 执行。后续若拆分，只能围绕稳定 effect/result 合同，不能再增加第二套运行路径；真实模型学习质量与后续复用仍待验收 |
 | [agent/ho/](../agent/ho/)、[agent/cae/](../agent/cae/)、[agent/me/](../agent/me/)、[agent/sm/](../agent/sm/)、[agent/te/](../agent/te/) | 生命周期、上下文组装、Memory/Persona、工具目录与检索的纯模块 | 有界关键词检索不是语义检索；真实场景中的提示质量、恢复策略与经验复用尚未验收 |
-| [agent/storage/](../agent/storage/) | 日志与状态批次适配；记录 `active-goal`、Goal、Task 和 EDT 记录的 Host revision；CAS 冲突后重读对应生命周期与持久事件 | 独立事件回执和其他可变集合仍未统一进入 revision ledger；还需覆盖多 Worker 回执竞态与长期运行 |
+| [agent/storage/](../agent/storage/) | 日志与状态批次适配；活动 OST、Goal、Task、EDT 与有效事件回执跟踪 Host revision，并在 CAS 冲突后按各自持久状态恢复 | 知识/Memory 等业务记录仍按领域键和来源写入，不代表所有集合都有统一 CAS；多执行者竞争与长期压力仍未验收 |
 | （§10.41 已删除）早期 `agent/model.mjs`、`agent/store.mjs` | Promise 式 Goal/Task 存储原型 | 仅有模拟测试曾引用；删除以避免与 Worker effect/result 主路径形成双轨 |
 | [app.js](../app.js) 与 [ui/](../ui/) | 指令、状态展示、生命周期控制事件投递，以及用户管理 IC/BP/Memory/TE | UI 控制只投递给 HO；UI 与 Worker 各自维护的记录仍需保持明确所有权和 revision 约束 |
 | [agent/worker.test.mjs](../agent/worker.test.mjs) 与模块测试 | 纯状态机、记录、检索和 Worker effect 流程自动验证 | Node 模拟不能证明 Haminn QuickJS 多模块加载、宿主续调度或真机 EDT/目标应用行为 |
@@ -35,12 +35,12 @@
 
 需要优先处理的通用缺陷：
 
-1. **生产存储仍未完全收敛**：生命周期由 Worker 单一路径写入，UI 用控制事件表达 pause/resume/cancel；旧 Promise 原型已删除。Worker 已对活动 OST、Goal、Task 和 EDT 记录使用 CAS，并对 OST 初始/排队登记、通知/计时事件入箱、用户控制、EDT 控制、订阅和收件箱重放冲突按持久事件恢复；其他独立事件回执与可变集合仍需按各自语义审视并发协调，不能盲目重写或把并发冲突当成普通 I/O 重试。
+1. **生产存储并发边界仍需继续审视**：生命周期由 Worker 单一路径写入，UI 用控制事件表达 pause/resume/cancel；旧 Promise 原型已删除。活动 OST、Goal、Task、EDT 与有效事件回执使用 Host revision；OST 初始/排队登记、通知/计时入箱、用户控制、EDT 控制、订阅和收件箱重放冲突按持久状态恢复。其他业务记录未纳入统一 CAS；继续按记录语义验证多执行者竞争，不能盲目重写或把冲突当普通 I/O 重试。
 2. **宿主与真机连续运行尚未验收**：代码具备 AL 到期复盘、OST 硬期限传递、持久日志、Host notification/timer 接入和队列恢复路径；仍需在 CMA-AN00 验证多轮 effect 续调度、HTTP/Bridge 取消、暂停/取消抢占、系统进程重建和事件去重的真实行为。
 3. **检索规模与语义仍有限**：ME、BP、TE 当前依赖有界扫描和轻量关键词重合；需要用实际任务验证现有简单排序够不够，再决定是否补轻量分页/索引，不预设外部向量服务。
 4. **恢复闭环需要场景证据**：模型能看到日志、失败信号和未决操作，并由 LLM 选择续做/换路；还要覆盖错误截图、错误操作、页面加载异常、重启和结果不确定时是否能继续，而非只看最终状态。
 5. **产品验收仍缺目标设备证据**：Node 测试和 Haminn 源码合同不能证明 QuickJS 对新增模块的实际加载、真机通知权限、真实微信界面识别/操作、模型复盘质量或完成后的经验复用。
-6. **学习维护生命周期尚未独立**：`learningStatus` 现在能随用户 OST 完成状态持久化并在 Worker 重启后续接，工作面板也能显示 pending/complete/skipped；但学习请求仍沿用同一活动记录执行，未实现独立的系统 EDT/outbox、低优先级维护 OST 及其公平调度，后续需按 §6.5 收敛完成。
+6. **学习维护已独立，闭环效果仍未验收**：用户 OST 完成与确定性 `l:` outbox 原子落库；队列空闲后 HO 创建独立、数据专用的低优先级维护 OST，支持恢复、重试和 30 分钟边界。仍需验证持续事件负载下的调度、失败可见性、学习幂等/防递归，以及下一次 OST 是否真实检索并使用有效积累。
 
 以上是源码结构与路径判断，不等同于每项都已在设备复现。升级测试应针对真实执行路径证明修复，而非为推测问题增加旁路补丁。
 
@@ -56,15 +56,15 @@
 | 已有基础 | 当前限制与升级要求 |
 |---|---|
 | 持续前台服务、隔离 QuickJS、实例/代码/授权校验 | 系统重建仍依赖持久任务恢复；不能把 START_STICKY 当作永不终止保证 |
-| 每实例 Channel 事件队列 | 内存队列容量 32，无持久交付/确认；接收 accepted 不证明业务已落库 |
-| `WorkerRuntime.deliver` 连续执行 JS 与原生调用 | 每事件最多 32 次原生调用，达到后抛 QUOTA；一次长 AL 可以跨越该阈值，不应被当作失败 |
-| 服务串行 `deliver`，`worker.wait` 使用 delay | 模型 HTTP/工具调用/等待期间后续控制事件被堵住；需异步 job 结果与可抢占控制入口 |
-| 普通 HTTP、流与 socket | 流/socket 有 owner 清理，普通 request 未提供同等可查询、取消的 owner/requestId 路径；stop 是否真正取消请求须补合同与实测 |
-| Worker data、readText/delete、interaction 与 network | 文件读写、清晰截图文件、屏幕状态、通知监听等不能因为页面 SDK 存在就默认 Worker 可用 |
+| 每实例持久 Worker 事件队列与进程内唤醒 Channel | SQLite `worker_events` 按优先级、eventId 持久入箱并在 Worker 处理后确认；控制事件独立配额且先出队。`accepted` 表示持久接受，不表示业务 OST 已完成；前台服务重建后的真实交付仍待设备验证 |
+| `WorkerRuntime.deliver` 连续执行 JS 与原生调用 | 每个时间片最多 32 次原生效果，达到后保存 pending call 并返回 yield；宿主续跑同一调用直至事件结束，不把正常长 AL 当作 QUOTA 失败。模拟器 80 次调用用例通过 |
+| 服务串行处理每实例事件，`worker.wait` 让出协程 | 持久高优先级控制先于普通事件；UI 停止 Worker 可取消网络 session，超时 watchdog 阻止越过 OST 截止点。进行中的 Android 输入无法撤回，且抢占延迟/事件重建仍需真机核验 |
+| 普通 HTTP、流与 socket | NativeHttpClient 按 Worker session 跟踪 request owner；stop/服务销毁/期限 watchdog 会取消请求并关闭流与 socket。请求取消与复用定向仪器测试通过，真机停机时序仍待验收 |
+| Worker Bridge 能力白名单 | 当前支持 `data.*`、`files.readText/delete`、`interaction.*`、受授权的 `network.*`、`notifications.subscribe/unsubscribe/status` 与 `timers.schedule/cancel/status`；页面有的其他能力不能推断为 Worker 可用 |
 | RecordsStore 原子批次与 CAS | 单记录 64 KiB；scan 最多 100，前缀检索；batch 最多 100 个不同键；需要分页索引与独立日志 |
-| 定时与外部通知 | 当前 Haminn 工作区已包含 Worker timer scheduler、外部通知监听与 subscription event router；这部分仍是未提交宿主改动，且当前设备状态未显示运行实例，不能视为已部署或真机验收 |
-| 截图与坐标操作、部分导航 operationId/status | 截图当前以内联图为主；点击/滑动/输入缺少统一原生操作回执与去重合同 |
-| API/SDK 已有 workers 接口 | 能力目录角色与 Worker 实际支持仍需同步，不能只改消费者或文档宣称支持 |
+| 定时与外部通知 | 当前 Haminn 工作区已包含持久 timer scheduler、外部通知监听、事件路由和订阅状态；Android 模拟器相关路由/调度测试通过，但改动仍未提交，目标设备未运行 |
+| 截图、坐标操作与系统导航回执 | ImHamster Worker 使用 `interaction.capture/tap/swipe/inputText` 等通用接口；系统导航另有 operationId/status 回执，普通输入/点击仍主要依赖 Worker 自身操作日志和下一次截图核实 |
+| workers API/SDK | Bridge 的实例授权、事件 ID、持久接受与 Worker 能力白名单均有实现；SDK/能力目录与生产路径仍须逐项对照并在设备确认，不以接口声明代替运行证据 |
 
 宿主当前未提交改动应先核对其实际来源与完整性，再在宿主仓库独立提交验证；不要把已有工作区改动全部当作本计划新增工作，也不要在 ImHamster 提交中夹带宿主文件。
 
