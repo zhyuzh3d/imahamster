@@ -688,7 +688,7 @@ JS 测试适合纯状态与组装；QuickJS/Android 仪器测试负责真实模�
 - 学习事件按来源 Goal 确定性去重并保留 CAS revision。维护启动原子更新事件为 running、递增尝试次数并登记维护 Goal/Task；重启按事件与活动 OST 续接。可重试模型错误在同一维护 OST 退避重试；不可恢复/耗尽或超时则将维护标记 skipped 并删除事件，来源用户 OST 仍保持 done。旧版显式 `learningStatus=pending` 状态若缺少事件，会在队列排空前重建 outbox。
 - 并发恢复复查发现通用 CAS 冲突流程会将所有非终态 OST 导向重新截图，这不适用于数据专用学习维护。Worker 现在识别持久的 `learningMaintenance` 状态，读取最新事件 revision 后续接，不访问屏幕；新增竞争启动 CAS 测试验证这一约束。
 - 修改集中在 `agent/learning/maintenance.mjs`、Worker 状态机、`agent/ho/records.mjs` 与工作面板状态模块。全量 Node 测试 159/159 通过；入口、Worker、学习模块、记录/UI 模块语法检查、`haminn.json` 解析与 `git diff --check` 通过。版本为 `0.1.44 / code 45`。
-- 设备验收未完成：当前 `adb devices -l` 仅显示 `emulator-5554`，物理手机没有 ADB transport。Haminn DEV watcher 存活且继续发布源码，但 app runtime `not-visible`、`targetReady=false`，无法进入 ImHamster 或验证真机 Worker/模型/微信行为。以上是本地合成与 watcher 发布证据，不计作设备验收。
+- 设备验收未完成：用户已确认手机连接；macOS IOUSB 能识别 CMA-AN00，但当前只观察到 MTP/HDB 接口，`adb devices -l` 仍仅显示 `emulator-5554`，所以不是物理断连，而是 ADB transport/调试授权尚未建立。Haminn DEV watcher 存活且继续发布源码，但 app runtime `not-visible`、`targetReady=false`，无法进入 ImHamster 或验证真机 Worker/模型/微信行为。以上是本地合成与 watcher 发布证据，不计作设备验收。
 
 ## 11. 交付与完成判定
 
