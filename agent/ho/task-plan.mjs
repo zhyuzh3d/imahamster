@@ -1,6 +1,6 @@
 const MAX_SUBTASKS = 31;
 
-/** Shared structural normalization for Worker and AgentStore Task plans. */
+/** Normalize the ordered Task plan proposed by the LLM before HO persists it. */
 export function normalizeTaskSpecifications(specifications, {
   goalId,
   createdAt = Date.now(),

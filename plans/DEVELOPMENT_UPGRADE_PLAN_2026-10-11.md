@@ -25,27 +25,21 @@
 
 | 位置 | 已有实现 | 升级问题 |
 |---|---|---|
-| [agent/worker.mjs](../agent/worker.mjs) | 后台入口、截图/模型/动作、队列、AL 预估/复盘、恢复退避、OST 截止时间、操作与学习候选 | 约 936 行集中实现；状态、调度、上下文、模型、操作与学习混在一起；模块间接口尚未形成 |
-| [agent/model.mjs](../agent/model.mjs) | 状态校验、旧 Goal/Task 模型、内部依赖校验 | 产品 Task 与旧内部 Task 混用；生产 Worker 没有接入这套模型 |
-| [agent/store.mjs](../agent/store.mjs) | CAS、原子任务计划、操作准备、事件收件箱等 | 未被生产 Worker 使用；Worker 又实现直接写入，形成两条不一致的状态路径 |
-| [app.js](../app.js) | 指令与浮层、配置、服务启停、状态展示、暂停/取消/恢复 | UI 直接改运行记录；恢复与重试混合；诊断请求和 Worker 请求分离 |
-| [agent/model.test.mjs](../agent/model.test.mjs)、[agent/worker.test.mjs](../agent/worker.test.mjs) | 模型/存储与 Worker 定向验证 | 存储测试通过不能证明实际 Worker 使用它；JS 模拟不能证明宿主长事件运行可继续 |
+| [agent/worker.mjs](../agent/worker.mjs) | 生产后台入口与 effect/result 状态机；串联 OST/EDT/AL、屏幕交互、CAE、学习与持久事件日志 | 仍是较大的生命周期协调器；进一步拆分必须围绕稳定 effect/result 合同，不能再增加第二套运行路径 |
+| [agent/ho/](../agent/ho/)、[agent/cae/](../agent/cae/)、[agent/me/](../agent/me/)、[agent/sm/](../agent/sm/)、[agent/te/](../agent/te/) | 生命周期、上下文组装、Memory/Persona、工具目录与检索的纯模块 | 有界关键词检索不是语义检索；真实场景中的提示质量、恢复策略与经验复用尚未验收 |
+| [agent/storage/journaled-write.mjs](../agent/storage/journaled-write.mjs) | 在 Worker 的 effect 写入中合并操作日志，并保留 CAS 条件 | 仅收敛日志包装这一条适配；Worker 尚未跟踪所有业务记录的 Host revision，也没有统一的 CAS 冲突重读/恢复流程 |
+| （§10.41 已删除）早期 `agent/model.mjs`、`agent/store.mjs` | Promise 式 Goal/Task 存储原型 | 仅有模拟测试曾引用；删除以避免与 Worker effect/result 主路径形成双轨 |
+| [app.js](../app.js) 与 [ui/](../ui/) | 指令、状态展示、生命周期控制事件投递，以及用户管理 IC/BP/Memory/TE | UI 控制只投递给 HO；UI 与 Worker 各自维护的记录仍需保持明确所有权和 revision 约束 |
+| [agent/worker.test.mjs](../agent/worker.test.mjs) 与模块测试 | 纯状态机、记录、检索和 Worker effect 流程自动验证 | Node 模拟不能证明 Haminn QuickJS 多模块加载、宿主续调度或真机 EDT/目标应用行为 |
 | [haminn.json](../haminn.json) | 后台 `agent/worker.mjs`、版本和能力声明 | 声明后台入口不代表 EDT 与所有页面 Bridge 能力已可在 Worker 使用 |
 
 需要优先处理的通用缺陷：
 
-1. **事件结果缺少关联校验**：`callId` 递增，但 `tool.result` 未与当前请求、OST/AL 和运行代际严格核对；迟到结果可能推进错误阶段。
-2. **状态多处写入**：Worker 不用 AgentStore 的 CAS/原子收件箱，UI 也写生命周期；`updateGoalAndTask` 重写空的 triggers/dependencies 等字段，未来接入任务计划会互相覆盖。
-3. **硬时限依赖回调**：截止时间检查主要发生在事件/工具边界，长请求或等待没有独立到期中断；后台“有 30 分钟字段”不等于硬边界可靠。
-4. **日志不完整**：`trace` 只保留当前状态最后 80 条，普通上下文/学习再截为 20/24 条；旧 AL 被覆盖，单一快照承载历史与大内容，无法复原长任务过程。
-5. **模型适配路径不统一**：动作请求支持响应文件读取，预估/复盘/学习的 `providerContent` 仍只取 `bodyText`，同一种返回形态会在不同阶段产生不同结果。
-6. **上下文是固定拼接**：只取最前面的少量 experience，无相关性检索、来源清单、Persona、BP、对象 Memory 或工具配方展开。
-7. **恢复与语义边界混杂**：`stop` 被自动覆盖为重试；发送按钮文本的硬编码参与决策校验；恢复次数在合法决策后重置，跨 AL 的循环无进展难以看见。
-8. **未确定操作易丢出上下文**：新的操作可覆盖当前 `pendingOperationId`，此前 unknown 操作虽可能有独立记录，却不再稳定提供给模型。
-9. **等待与 AL 切换不一致**：短等待也关闭 AL，下一次 tick 再重新预估，造成不必要的模型开销；长期外部等待缺少 EDT 表达。
-10. **成功后学习脆弱**：学习串在用户任务后，失败直接跳过；只保存 experience 或描述型 tool-candidate，不具备可执行工具闭环，也未覆盖联系人事实、BP。
-11. **EDT 尚未实现**：当前提交始终生成屏幕单次执行记录，triggers 为空；没有订阅、事件语义匹配、持久游标和每次触发独立 OST。
-12. **重试语义不完整**：前台先把失败/等待状态改回 active，抹去阻碍类别；旧截止时间和旧结果可能再次进入执行，新尝试没有清晰独立记录。
+1. **生产存储仍未完全收敛**：生命周期由 Worker 单一路径写入，UI 用控制事件表达 pause/resume/cancel；旧 Promise 原型已删除。Worker 仍需在生产 effect/result 路径中统一记录 revision、为状态批次设置 CAS，并在 `E_CONFLICT` 时基于最新持久状态协调，而不能盲目重写或把并发冲突当成普通 I/O 重试。
+2. **宿主与真机连续运行尚未验收**：代码具备 AL 到期复盘、OST 硬期限传递、持久日志、Host notification/timer 接入和队列恢复路径；仍需在 CMA-AN00 验证多轮 effect 续调度、HTTP/Bridge 取消、暂停/取消抢占、系统进程重建和事件去重的真实行为。
+3. **检索规模与语义仍有限**：ME、BP、TE 当前依赖有界扫描和轻量关键词重合；需要用实际任务验证现有简单排序够不够，再决定是否补轻量分页/索引，不预设外部向量服务。
+4. **恢复闭环需要场景证据**：模型能看到日志、失败信号和未决操作，并由 LLM 选择续做/换路；还要覆盖错误截图、错误操作、页面加载异常、重启和结果不确定时是否能继续，而非只看最终状态。
+5. **产品验收仍缺目标设备证据**：Node 测试和 Haminn 源码合同不能证明 QuickJS 对新增模块的实际加载、真机通知权限、真实微信界面识别/操作、模型复盘质量或完成后的经验复用。
 
 以上是源码结构与路径判断，不等同于每项都已在设备复现。升级测试应针对真实执行路径证明修复，而非为推测问题增加旁路补丁。
 
@@ -67,7 +61,7 @@
 | 普通 HTTP、流与 socket | 流/socket 有 owner 清理，普通 request 未提供同等可查询、取消的 owner/requestId 路径；stop 是否真正取消请求须补合同与实测 |
 | Worker data、readText/delete、interaction 与 network | 文件读写、清晰截图文件、屏幕状态、通知监听等不能因为页面 SDK 存在就默认 Worker 可用 |
 | RecordsStore 原子批次与 CAS | 单记录 64 KiB；scan 最多 100，前缀检索；batch 最多 100 个不同键；需要分页索引与独立日志 |
-| 本应用通知发布与定时发布 | 没有向 Worker 交付定时事件；没有其他应用通知监听；已有通知 API 不能直接满足微信 EDT |
+| 定时与外部通知 | 当前 Haminn 工作区已包含 Worker timer scheduler、外部通知监听与 subscription event router；这部分仍是未提交宿主改动，且当前设备状态未显示运行实例，不能视为已部署或真机验收 |
 | 截图与坐标操作、部分导航 operationId/status | 截图当前以内联图为主；点击/滑动/输入缺少统一原生操作回执与去重合同 |
 | API/SDK 已有 workers 接口 | 能力目录角色与 Worker 实际支持仍需同步，不能只改消费者或文档宣称支持 |
 
@@ -610,15 +604,22 @@ JS 测试适合纯状态与组装；QuickJS/Android 仪器测试负责真实模�
 
 - 为减少 Worker 中跨 ME/SM/TE 的领域记录组装，将成功任务后的候选产物生成移至 `agent/learning/records.mjs`。模块只接收 LLM 建议、完成 OST 和有限轨迹，返回待提交记录及跳过原因；不执行 Haminn IO、不改 IC，也不作语义成功判断。Worker 保留调度、日志和事务提交责任。
 - 测试覆盖 Memory/BP/experience/候选/recipe 的来源和工具白名单，以及单条配方无效时保留其他有效学习产物。全量 `node --test` 135/135 通过，Worker、学习模块语法检查和 `git diff --check` 通过。
-- 对照实现后明确：`AgentStore` 目前使用 Promise 式直接数据 API，而 Haminn 生产 Worker 通过 effect/result 回合发起数据请求；当前 Worker 才是生产生命周期单写者，AgentStore 仍是未接线原型。不能仅在 Worker 中 `new AgentStore()` 就满足唯一 store。U0 的生产存储收敛仍未完成，需要先定义与现有 effect/result 生命周期兼容的 store 请求/响应合同，再渐进替换生产路径。该次抽取不关闭 U0。
+- 对照实现后明确：当时的 `AgentStore` 使用 Promise 式直接数据 API，而 Haminn 生产 Worker 通过 effect/result 回合发起数据请求；不能仅在 Worker 中 `new AgentStore()` 就满足唯一 store。该原型后续在 §10.41 删除；U0 的生产存储收敛仍未完成。
 - 当前设备核验仍只枚举 `emulator-5554`；Haminn DEV `targetReady=false`、runtime `not-visible`。本次变化未获得真机模块加载或交互证据。
 
 ### 10.40 建立 Worker 持久化写入适配边界并保留 CAS（2026-10-11）
 
-- 复核 Worker 与 `AgentStore` 的数据接口时发现，Worker 为将待写操作日志与业务状态原子提交，会把单条 `data.put` 改写为 `data.batch`；旧转换只复制集合、键和值，会丢弃调用者提供的 `expectedRevision`。因此，任何经过日志包装的 CAS 写入都可能退化为无条件写入，造成并发覆盖风险。
+- 复核 Worker 与早期 `AgentStore` 的数据接口时发现，Worker 为将待写操作日志与业务状态原子提交，会把单条 `data.put` 改写为 `data.batch`；旧转换只复制集合、键和值，会丢弃调用者提供的 `expectedRevision`。当前 Worker 的直接 put 调用点还没有传此条件，因此这是接入 CAS 前发现的适配风险，不是已证明的本轮运行故障；若不修，后续带 CAS 的写入会退化为无条件写入。
 - 新增 `agent/storage/journaled-write.mjs`，集中负责这种存储 effect 转换，并原样保留单条 put 与既有 batch 中每条操作的版本条件。生产 Worker 已改为经过该适配模块生成日志批次；它只处理 Haminn effect 请求形状，不承担 HO 生命周期或结果判断，也不把 Promise 式 `AgentStore` 接入 Worker。
 - 回归测试覆盖 put 的 CAS 保留、batch 内 put/delete 版本条件保留，以及没有日志时不改变调用形状。专项测试 3/3、全量 `node --test` 138/138 通过，Worker 与模块语法检查、`git diff --check` 通过。Haminn Host 的 `RecordsStore.batch()` 会在 SQLite transaction 内先校验每条 `expectedRevision` 再执行操作，`CapabilityKernel` 将其传到数据层，确认该批次合同确实支持原子 CAS。
-- 这只修复并验证了“日志包装会丢弃传入 CAS”的适配缺陷，不代表 Worker 已全面使用 CAS，也不关闭 U0。下一步仍需统一生产 Worker 与 UI 的生命周期写入权、版本读取/回写和冲突恢复合同；真机当前仍需复验。
+- 这只修复并验证了“日志包装会丢弃传入 CAS”的适配缺陷，不代表 Worker 已全面使用 CAS，也不关闭 U0。下一步仍需在唯一 Worker 生命周期写入路径中统一版本读取/回写和冲突恢复合同；真机当前仍需复验。
+
+### 10.41 移除未接线的 Promise 存储原型（2026-10-11）
+
+- 全仓引用核对确认，`agent/store.mjs` 与 `agent/model.mjs` 只由对应模拟测试和彼此引用；生产 Worker、UI 和 `haminn.json` 均不导入。该原型自己实现一套 Promise 式 Goal/Task/operation 生命周期，不能成为 Worker effect/result 回路中的生产 store，也使“生产唯一主路径”在源码层仍显得双轨。
+- 删除该未接线原型及仅验证它的 `agent/model.test.mjs`，保留 Worker 使用的 `agent/ho/task-plan.mjs` 结构校验、HO 生命周期测试和 storage effect 适配。未删除 Haminn 数据，也未更改运行时接口；README 与当前代码盘点改为描述实际主路径。
+- 删除后全量 `node --test` 130/130 通过；`app.js`、Worker、Task 计划和 storage effect 语法检查及 `git diff --check` 通过。Haminn DEV watcher 已同步当前树至 revision 1275，但 `targetReady=false`、runtime `not-visible`；ADB 仅枚举 `emulator-5554`，未取得手机行为证据。
+- 这是死代码收敛，不等于完成 U0。当前生产 Worker 仍未对所有生命周期批次持续跟踪 Host revision，也未定义 CAS 冲突后的重新读取与 LLM/HO 协调方式；必须作为下一项存储工作处理，避免盲目重试状态覆盖。
 
 ## 11. 交付与完成判定
 

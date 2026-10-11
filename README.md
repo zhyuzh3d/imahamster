@@ -12,11 +12,11 @@ ImHamster 是普通 Haminn happ，不需要单例。Haminn 通过一个 Android 
 
 此流程不读取辅助功能控件树，不调用目标 App 的专用 API，不使用 ADB 输入或 shell 自动化。Haminn 只提供系统级截图和操作原语，Happ 自己决定目标与下一步。截图和指令会发送给已配置的 CodeBestie 服务；页面的知情同意会说明这一点。后台任务依赖 `workers.run`、`screen.interaction` 与模型服务网络授权。暂停会先停止 Worker，再持久化任务状态；继续时重新截图核对未完成操作。取消会停止 Worker、取消当前任务并清空排队目标。
 
-事件驱动任务（EDT）的通知进入 Haminn 持久事件队列；暂停、恢复和取消作为高优先级控制事件进入独立保留配额，积压通知不能占满控制容量。控制当前待命 EDT 时，前台先停止该空闲 Worker，宿主在恢复任务前应用持久控制，再处理尚未匹配的本地通知；已触发的 OST 保持独立生命周期。定时触发目前尚未接入。
+事件驱动任务（EDT）的通知进入 Haminn 持久事件队列；暂停、恢复和取消作为高优先级控制事件进入独立保留配额，积压通知不能占满控制容量。控制当前待命 EDT 时，前台先停止该空闲 Worker，宿主在恢复任务前应用持久控制，再处理尚未匹配的本地通知；已触发的 OST 保持独立生命周期。代码包含持久计时事件和外部通知订阅，真机权限、进程恢复与真实应用触发仍待设备验收。
 
 ## 代理核心开发状态
 
-`agent/model.mjs` 与 `agent/store.mjs` 定义兼容用的 Goal/Task 数据记录、事件收件箱和外部操作回执；产品术语见[术语表](docs/术语表.md)。`agent/worker.mjs` 是 `haminn.json` 声明的本地后台入口，负责 OST 排队、AL 调度、单步屏幕动作和进展恢复；`agent/sm/identity-core.mjs` 保存有稳定使命与行为原则、不可由学习流程改写的 Identity Core，`agent/sm/behavior-patterns.mjs` 保存与检索经学习整理的 BP，`agent/cae/prompts.mjs` 将 IC 与执行策略组合，`agent/me/retrieval.mjs` 从有限经验候选中按中英文关键词重合排序，`agent/te/catalog.mjs` 集中登记 Worker 可执行的屏幕工具，`agent/te/retrieval.mjs` 按任务检索学习得到的非执行流程候选，`agent/cae/context.mjs` 再组装有界的动作上下文。BP 当前只覆盖全局偏好，管理页面支持查看、修订、启用、停用与删除，尚未支持按应用/对象分类；Tool Engine 面板可查看有限的可执行工具目录，并管理候选流程的说明、工具引用、启停和删除。候选流程只作模型参考，不能直接执行或扩大授权。当前 ME/BP/TE 排序是轻量关键词基线，不等同语义检索，也受限于单次扫描的 100 条记录。屏幕动作采用“先持久化 prepared 回执，再派发，后截图核实”的顺序；结果未知时保留压缩索引供后续 CAE 查看，完整操作回执留在独立日志中，模型可据此继续或换路而不盲目重放。运行 `node --test` 执行状态、Worker、SM、ME、TE 与 CAE 单测。Haminn HostService 生命周期及合成页面截图、模型判断和按钮操作已有 CMA-AN00 真机证据；真实目标应用、暂停/继续/取消控件真机验收、断电恢复和长时间压力仍需设备验收。
+`agent/worker.mjs` 是 `haminn.json` 声明的本地后台入口，也是 OST 生命周期的唯一生产协调器；它按 effect/result 回合访问 Haminn 数据，并串联 HO、CAE、ME、SM、TE 与成功后学习模块。`app.js` 负责指令、配置、状态展示和向 HO 投递控制事件；管理界面通过 Bridge revision 编辑 IC、BP、Memory 与 Tool Engine 记录。产品术语见[术语表](docs/术语表.md)。BP 当前只覆盖全局偏好，尚未支持按应用/对象分类；ME/BP/TE 使用有界扫描与轻量关键词相关度，不等同语义检索。工具配方提供有序工具引用供 LLM 决策，不能直接执行或扩大授权。屏幕动作采用“先持久化 prepared 回执，再派发，后截图核实”的顺序；结果未知时保留压缩索引供后续 CAE 查看，完整操作回执留在独立日志中。运行 `node --test` 执行 JavaScript 状态、Worker、SM、ME、TE 与 CAE 测试。源码已有 HO/EDT、AL 复盘、CAE 来源清单、学习记录和过程日志实现；真机长时运行、事件触发、重启恢复、目标应用操作和真实模型策略采用仍须逐项验收。
 
 `agent/me/memory.mjs` 保存带来源的 fact/episode 对象记忆，区分直接观察与推测；任务文字没有对象名称时，LLM 可先从截图识别对象并请求精确 objectRef，ME 只返回该对象的记录，之后 Worker 重新截图再继续。学习只保留短摘要，不复制整段聊天。可复用操作经验由 ME 检索和版本化保存；Memory 管理面板统一分页查看事实、经历与经验，支持修订和二次确认删除。`agent/cae/manifest.mjs` 为模型请求记录被选上下文的来源引用、修订、当前观察引用、裁剪数量和字符/粗略 token 规模，不复制上下文正文或截图。`ui/self-model.mjs` 组合 Persona/BP 与 Memory 管理模块；`ui/tools.mjs` 独立呈现 TE 已注册工具与学习得到的非执行流程候选；`ui/worker-journal.mjs` 在过程记录展开期间增量刷新 HO 事件日志。管理写操作使用 Bridge revision 防止覆盖并发修改。
 
