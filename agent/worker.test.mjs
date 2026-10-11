@@ -277,7 +277,7 @@ test("LLM requests Persona and object Memory only when relevant and HO restores 
   assert.equal(manifest?.purpose, "action");
   assert.deepEqual(manifest?.selected.identityCore, { source: "user", version: 2 });
   assert.deepEqual(manifest?.selected.memories, [{ ref: "knowledge:memory:contact-zhangsan", revision: "1", recordRevision: "1" }]);
-  assert.deepEqual(manifest?.selected.experiences, [{ ref: "knowledge:experience:reply", recordRevision: "3" }]);
+  assert.deepEqual(manifest?.selected.experiences, [{ ref: "knowledge:experience:reply", revision: "1", recordRevision: "3" }]);
   assert.deepEqual(manifest?.selected.behaviorPatterns, [{ ref: "self-model:bp:reply", recordRevision: "5" }]);
   assert.deepEqual(manifest?.selected.toolCandidates, [{ ref: "knowledge:tool-candidate:reply-flow", recordRevision: "4" }]);
   assert.equal(saved.trace.some(event => event.phase === "context.requested" && event.includeIdentityCore), true);
