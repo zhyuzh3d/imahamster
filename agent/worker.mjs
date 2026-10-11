@@ -16,9 +16,12 @@ import { makeJournalEntry } from "./observability/journal.mjs";
 import { prepareJournaledStoreWrite } from "./storage/journaled-write.mjs";
 import {
   clearLifecycleRevisions,
+  forgetLifecycleRevision,
   hasLifecycleWrite,
+  isEventReceiptKey,
   knowsLifecycleRevision,
   lifecycleStoreContractError,
+  nextUnobservedEventReceiptWrite,
   observeStoreEffectResult,
   prepareRevisionCheckedWrite,
 } from "./storage/revisions.mjs";
@@ -93,6 +96,7 @@ const CRITICAL_STATE_READ_STAGES = new Set([
   "event-task-control-receipt-read", "event-task-control-task-read",
   "goal-control-receipt-read", "goal-control-active-read", "goal-control-goal-read", "goal-control-task-read",
   "goal-control-queue-read",
+  "event-receipt-revision-read",
 ]);
 const POST_TASK_QUEUE_READ_STAGES = new Set([
   "queue-read", "completed-queue-read", "notification-read", "timer-read",
@@ -132,6 +136,7 @@ let pendingEventTaskRecord = null;
 let pendingEventTaskSubscriptionRecovery = null;
 let pendingEventTaskControl = null;
 let pendingGoalControl = null;
+let pendingEventReceiptWrite = null;
 let startupNeedsQueueDrain = false;
 let controlNeedsQueueDrain = false;
 
@@ -215,6 +220,17 @@ function handleProviderResult(result) {
 }
 
 function action(method, params = {}) {
+  const unobservedReceipt = nextUnobservedEventReceiptWrite(method, params, lifecycleRevisions);
+  if (unobservedReceipt) {
+    if (pendingEventReceiptWrite) throw new Error("事件回执修订读取期间又出现新的待写入操作");
+    pendingEventReceiptWrite = { method, params, stage: pending, awaitingKey: unobservedReceipt.key };
+    pending = "event-receipt-revision-read";
+    method = "data.get";
+    params = unobservedReceipt;
+  }
+  if (pending === "event-receipt-revision-read" && pendingEventReceiptWrite && method === "data.get") {
+    pendingEventReceiptWrite.awaitingKey = params.key;
+  }
   const callId = `${workerEpoch}:w${++callSequence}`;
   const journaledWrite = prepareJournaledStoreWrite({
     method, params, state, events: journalPending,
@@ -266,8 +282,19 @@ function workerPersistenceFailure(error, stage) {
   return failure;
 }
 
-function beginStorageConflictRecovery(error, method, failedStage) {
+function eventReceiptWrites(method, params) {
+  const operations = method === "data.put" ? [{
+    collection: params?.collection, key: params?.key, value: params?.value,
+  }] : method === "data.batch" && Array.isArray(params?.operations) ? params.operations : [];
+  return operations.filter(operation => operation?.op !== "delete" && operation?.collection === COLLECTION &&
+    isEventReceiptKey(operation?.key));
+}
+
+function beginStorageConflictRecovery(error, method, failedStage, failedParams = null) {
   const stage = String(failedStage || "unknown");
+  for (const operation of eventReceiptWrites(method, failedParams)) {
+    forgetLifecycleRevision(lifecycleRevisions, COLLECTION, operation.key);
+  }
   storageConflictAttempts += 1;
   if (storageConflictAttempts > MAX_STORAGE_CONFLICT_RECOVERIES) {
     throw workerPersistenceFailure(error, `${stage}（CAS 冲突恢复 ${storageConflictAttempts - 1} 次后仍失败）`);
@@ -2185,6 +2212,19 @@ function advanceAfterTool(event) {
     return action("data.put", { collection: COLLECTION, key: ACTIVE_KEY, value: state });
   }
   switch (pending) {
+    case "event-receipt-revision-read": {
+      const write = pendingEventReceiptWrite;
+      if (!write) throw new Error("事件回执修订读取缺少待写入操作");
+      const expected = eventReceiptWrites(write.method, write.params)
+        .find(operation => operation.key === write.awaitingKey);
+      if (!expected) throw new Error("事件回执修订读取与待写入键不匹配");
+      if (result?.value) assertEventReceiptIdentity(result.value, expected.value?.eventId, expected.value?.type);
+      const next = nextUnobservedEventReceiptWrite(write.method, write.params, lifecycleRevisions);
+      if (next) return action("data.get", next);
+      pendingEventReceiptWrite = null;
+      pending = write.stage;
+      return action(write.method, write.params);
+    }
     case "storage-conflict-active-read": {
       state = result?.value || null;
       if (storageConflictContext?.kind === "goal-registration") {
@@ -2983,6 +3023,7 @@ globalThis.onHaminnEvent = event => {
       pendingGoalSubmit = null;
       pendingGoalRegistration = null;
       pendingGoalControl = null;
+      pendingEventReceiptWrite = null;
       startupNeedsQueueDrain = false;
       controlNeedsQueueDrain = false;
       suspendedActiveCall = null;
@@ -3009,10 +3050,11 @@ globalThis.onHaminnEvent = event => {
             GOAL_CONTROL_CONFLICT_STAGES.has(pending) || (pending === "queue-saved" && pendingGoalRegistration))) {
         const failedMethod = activeCallMethod;
         const failedStage = pending;
+        const failedParams = activeCallParams;
         activeCallId = null;
         activeCallMethod = null;
         activeCallParams = null;
-        return beginStorageConflictRecovery(event.error, failedMethod, failedStage);
+        return beginStorageConflictRecovery(event.error, failedMethod, failedStage, failedParams);
       }
       const failedCriticalRead = (failedBridgeMethod === "data.get" || failedBridgeMethod === "data.scan") &&
         CRITICAL_STATE_READ_STAGES.has(pending);

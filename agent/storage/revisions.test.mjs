@@ -2,9 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   clearLifecycleRevisions,
+  forgetLifecycleRevision,
   hasLifecycleWrite,
+  isEventReceiptKey,
   knowsLifecycleRevision,
   lifecycleStoreContractError,
+  nextUnobservedEventReceiptWrite,
   observeStoreEffectResult,
   prepareRevisionCheckedWrite,
 } from "./revisions.mjs";
@@ -24,6 +27,9 @@ test("known lifecycle revisions are attached to writes without overriding explic
   }, revisions).expectedRevision, "r-explicit");
   assert.equal(hasLifecycleWrite("data.put", { collection: "agent-runtime", key: "active-goal" }), true);
   assert.equal(hasLifecycleWrite("data.put", { collection: "agent-runtime", key: "event:receipt" }), false);
+  assert.equal(isEventReceiptKey("event:0123456789abcdef"), true);
+  assert.equal(isEventReceiptKey("event:receipt"), false);
+  assert.equal(hasLifecycleWrite("data.put", { collection: "agent-runtime", key: "event:0123456789abcdef" }), true);
   assert.equal(hasLifecycleWrite("data.put", { collection: "knowledge", key: "memory:1" }), false);
 
   observeStoreEffectResult(revisions, "data.get", { collection: "event-tasks", key: "ed:edt-1" },
@@ -84,6 +90,30 @@ test("a confirmed missing lifecycle record is written with the absent condition"
   ] }, revisions).operations[0].expectedRevision, "absent");
 });
 
+test("event receipts require a fresh Host revision before first write and refresh after conflict", () => {
+  const revisions = new Map();
+  const key = "event:0123456789abcdef";
+  const write = { operations: [{ op: "put", collection: "agent-runtime", key, value: {
+    eventId: "submit-1", type: "goal.submit", state: "accepted",
+  } }] };
+  assert.deepEqual(nextUnobservedEventReceiptWrite("data.batch", write, revisions), {
+    collection: "agent-runtime", key,
+  });
+
+  observeStoreEffectResult(revisions, "data.get", { collection: "agent-runtime", key }, null);
+  assert.equal(nextUnobservedEventReceiptWrite("data.batch", write, revisions), null);
+  assert.equal(prepareRevisionCheckedWrite("data.batch", write, revisions).operations[0].expectedRevision, "absent");
+
+  forgetLifecycleRevision(revisions, "agent-runtime", key);
+  assert.deepEqual(nextUnobservedEventReceiptWrite("data.batch", write, revisions), {
+    collection: "agent-runtime", key,
+  });
+  observeStoreEffectResult(revisions, "data.get", { collection: "agent-runtime", key }, {
+    revision: "receipt-r7", value: write.operations[0].value,
+  });
+  assert.equal(prepareRevisionCheckedWrite("data.batch", write, revisions).operations[0].expectedRevision, "receipt-r7");
+});
+
 test("a malformed record without a revision does not masquerade as an absent record", () => {
   const revisions = new Map([["agent-runtime\u0000active-goal", "known-r1"]]);
   observeStoreEffectResult(revisions, "data.get", { collection: "agent-runtime", key: "active-goal" }, { value: {} });
@@ -95,6 +125,9 @@ test("a malformed record without a revision does not masquerade as an absent rec
 test("malformed Host results cannot silently disable lifecycle CAS", () => {
   assert.match(lifecycleStoreContractError("data.get", {
     collection: "agent-runtime", key: "active-goal",
+  }, { value: {} }), /Host revision/);
+  assert.match(lifecycleStoreContractError("data.get", {
+    collection: "agent-runtime", key: "event:0123456789abcdef",
   }, { value: {} }), /Host revision/);
   assert.match(lifecycleStoreContractError("data.batch", { operations: [
     { op: "put", collection: "tasks", key: "t:1", value: {} },

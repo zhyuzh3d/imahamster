@@ -662,6 +662,13 @@ JS 测试适合纯状态与组装；QuickJS/Android 仪器测试负责真实模�
 - HO 现在保留原始通知/计时事件直至入箱批次成功。两个入箱阶段发生 CAS 冲突时先读 receipt：若竞争投递已提交匹配 receipt，则幂等返回；若没有，则用保留的原始事件重试原子写入。统一 receipt 身份校验要求 event ID 和事件类型同时相符，避免跨事件类型误去重。
 - 纯模块测试验证 receipt 身份匹配/错配；Worker 合成集成测试分别覆盖通知和计时事件的竞争提交与无 receipt 重试。定向测试及全量 `node --test` 148/148 通过；语法和差异检查通过。真机仍未被 ADB 枚举，事件监听与持续运行尚无手机运行证据。
 
+### 10.48 `agent-runtime` 事件回执并发写入 CAS（2026-10-11）
+
+- 对照 10.42 留下的多 Worker 风险继续追查后确认：`agent-runtime/active-goal` 已使用 Host revision，但 `agent-runtime/event:<16位哈希>` 回执不在 revision ledger 中。两个 Worker 同时读到回执缺失、或重启后从持久 inbox 恢复事件，都可能不带条件写回执，覆盖并发 Worker 已确认的状态。
+- 现在只把格式有效的事件回执键纳入同一 revision ledger；新写入及进程恢复路径会先读取尚未观察修订的回执，再以 `expectedRevision=absent` 或当前 Host revision 写入。Host 对关键记录缺少 revision 时阻断该次写入；回执写 CAS 冲突后废弃本地旧 revision，由对应 OST/EDT 恢复路径重新读回执或扫描持久 inbox，不重放已完成的事件。
+- 模块测试覆盖有效键筛选、缺失/已存在回执 revision、冲突后重新读取和 malformed Host 结果。Worker 合成测试覆盖 OST 回执的 absent 条件，以及另一 Worker 已更新回执并删除 inbox 后，恢复路径保留其最终结果、不二次处理。全量 `node --test` 149/149 通过，Worker/revision 模块语法检查及 `git diff --check` 通过。
+- DEV watcher 接收并提交 `0.1.42` / code 43，服务 revision 1382，源码状态 `dirty`；当前 UI 运行态为 `not-visible`、没有页面渲染确认。通过服务尝试打开目标 happ 返回“Haminn has no foreground activity”。本轮 USB 复核确认 macOS IOUSB 树已识别 CMA-AN00（AKGR9K1C26013127）；重启本机 ADB 后仍只枚举 `emulator-5554`，没有建立该手机的 ADB transport。因此本节无 ImHamster 手机运行或微信行为证据；之前记录的“USB 未枚举”按当时证据记录保留，不把它当作当前状态。
+
 ## 11. 交付与完成判定
 
 ImHamster 与 Haminn 独立提交、验证和推送；每次提交前核对各自 Git 根与 origin，保留无关工作区改动。宿主新增合同需同步 SDK/能力文档/实际实现，消费者只接入确实支持的能力。

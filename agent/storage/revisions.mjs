@@ -1,12 +1,16 @@
 const LIFECYCLE_COLLECTIONS = new Set(["agent-runtime", "goals", "tasks", "event-tasks"]);
 
+export function isEventReceiptKey(key) {
+  return typeof key === "string" && /^event:[a-f0-9]{16}$/.test(key);
+}
+
 function recordKey(collection, key) {
   return `${collection}\u0000${key}`;
 }
 
 function isTracked(collection, key) {
   if (typeof key !== "string" || !key) return false;
-  if (collection === "agent-runtime") return key === "active-goal";
+  if (collection === "agent-runtime") return key === "active-goal" || isEventReceiptKey(key);
   if (collection === "event-tasks") return key.startsWith("ed:");
   return LIFECYCLE_COLLECTIONS.has(collection);
 }
@@ -43,6 +47,27 @@ export function prepareRevisionCheckedWrite(method, params, revisions) {
     return { ...operation, expectedRevision: revisions.get(key) };
   });
   return changed ? { ...params, operations } : params;
+}
+
+/** Return one event receipt write that still needs an observed revision. */
+export function nextUnobservedEventReceiptWrite(method, params, revisions) {
+  if (!(revisions instanceof Map)) throw new TypeError("A lifecycle revision map is required");
+  const operations = method === "data.put" ? [{
+    op: "put", collection: params?.collection, key: params?.key,
+    ...(Object.hasOwn(params || {}, "expectedRevision") ? { expectedRevision: params.expectedRevision } : {}),
+  }] : method === "data.batch" && Array.isArray(params?.operations) ? params.operations : [];
+  for (const operation of operations) {
+    if (operation?.collection !== "agent-runtime" || !isEventReceiptKey(operation?.key) ||
+        Object.hasOwn(operation, "expectedRevision")) continue;
+    const key = recordKey(operation.collection, operation.key);
+    if (!revisions.has(key)) return { collection: operation.collection, key: operation.key };
+  }
+  return null;
+}
+
+export function forgetLifecycleRevision(revisions, collection, key) {
+  if (!(revisions instanceof Map)) throw new TypeError("A lifecycle revision map is required");
+  revisions.delete(recordKey(collection, key));
 }
 
 /** Learn record revisions only from acknowledged Haminn store results. */

@@ -71,6 +71,9 @@ test("a goal-registration CAS conflict preserves the submitted intent and queues
   assert.equal(output.actions[0].method, "data.batch");
   assert.ok(output.actions[0].params.operations.some(operation => operation.collection === "agent-runtime" &&
     operation.key === "active-goal"));
+  assert.equal(output.actions[0].params.operations.find(operation => operation.collection === "agent-runtime" &&
+    operation.key === eventReceiptKey(eventId)).expectedRevision, "absent",
+  "the initial Host read must fence off a competing submitter that commits the same event first");
 
   const concurrentlyStarted = { goalId: "g-concurrent-ost", taskId: "t-concurrent-ost", runId: "run-concurrent-ost",
     intent: "并发开始的另一个合成 OST", state: "active", taskType: "one-shot", taskKind: "OST", revision: 1,
@@ -1412,12 +1415,17 @@ test("an EDT inbox settlement CAS conflict replays the durable event after clear
   records.set(`event-tasks:ed:${eventTask.eventTaskId}`, { value: eventTask, revision: "edt-r1" });
   const eventIds = Array.from({ length: 4 }, (_, index) => `notification:cancelled-cas-event-${index + 1}`);
   const inboxKeys = new Map(eventIds.map(eventId => [notificationInboxKey(eventId), eventId]));
-  eventIds.forEach((eventId, index) => records.set(`inbox:${notificationInboxKey(eventId)}`, { value: {
-    type: "notification.posted", eventId, subscriptionId: eventTask.eventTaskId,
-    sourcePackage: "com.tencent.mm", occurredAt: 1_800_000_000_000 + index,
-    receivedAt: 1_800_000_000_001 + index,
-    notification: { title: "zhyuzh", text: "合成通知，取消后不应触发" }, state: "received",
-  }, revision: `inbox-r${index + 1}` }));
+  eventIds.forEach((eventId, index) => {
+    records.set(`inbox:${notificationInboxKey(eventId)}`, { value: {
+      type: "notification.posted", eventId, subscriptionId: eventTask.eventTaskId,
+      sourcePackage: "com.tencent.mm", occurredAt: 1_800_000_000_000 + index,
+      receivedAt: 1_800_000_000_001 + index,
+      notification: { title: "zhyuzh", text: "合成通知，取消后不应触发" }, state: "received",
+    }, revision: `inbox-r${index + 1}` });
+    records.set(`agent-runtime:${eventReceiptKey(eventId)}`, { value: {
+      eventId, type: "notification.posted", state: "received", inboxKey: notificationInboxKey(eventId),
+    }, revision: `receipt-r${index + 1}` });
+  });
   const conflictedEventIds = new Set();
   let settlementAttempts = 0;
   let modelCalls = 0;
@@ -1429,8 +1437,20 @@ test("an EDT inbox settlement CAS conflict replays the durable event after clear
       if (settlement) {
         settlementAttempts += 1;
         const eventId = inboxKeys.get(settlement.key);
+        const receiptWrite = params.operations.find(operation => operation.collection === "agent-runtime" &&
+          operation.key === eventReceiptKey(eventId));
+        assert.equal(receiptWrite?.expectedRevision, records.get(`agent-runtime:${eventReceiptKey(eventId)}`)?.revision,
+          "replayed events must load the current receipt revision before changing it");
         if (!conflictedEventIds.has(eventId)) {
           conflictedEventIds.add(eventId);
+          if (eventId === eventIds[0]) {
+            records.set(`agent-runtime:${eventReceiptKey(eventId)}`, {
+              value: { ...receiptWrite.value, state: "ignored", reason: "committed by competing Worker" },
+              revision: "receipt-raced-r2",
+            });
+            records.delete(`inbox:${settlement.key}`);
+            return { __toolError: { code: "E_CONFLICT", message: "receipt and inbox committed concurrently" } };
+          }
           return { __toolError: { code: "E_CONFLICT", message: "inbox revision changed" } };
         }
       }
@@ -1467,7 +1487,7 @@ test("an EDT inbox settlement CAS conflict replays the durable event after clear
   assert.equal(deliver({ type: "start" }).state, "event-driven");
   const drained = deliver({ type: "worker.queue-drained" });
   assert.equal(drained.state, "event-driven");
-  assert.equal(settlementAttempts, 8, "each conflict must rescan and settle its durable notification exactly once");
+  assert.equal(settlementAttempts, 7, "a concurrent receipt+inbox commit is recognized and is not replayed");
   for (const eventId of eventIds) {
     assert.equal(records.get(`agent-runtime:${eventReceiptKey(eventId)}`).value.state, "ignored");
     assert.equal(records.has(`inbox:${notificationInboxKey(eventId)}`), false);
