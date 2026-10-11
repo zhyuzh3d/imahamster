@@ -1542,6 +1542,38 @@ test("post-completion queue read errors do not reopen or fail the completed OST"
   assert.equal(final.actions, undefined, "a queue bookkeeping fault must not restart the completed task");
 });
 
+test("state persistence failures return once without recursively retrying the same write", () => {
+  let batchCalls = 0;
+
+  function tool(method, params) {
+    if (method === "data.get") return null;
+    if (method === "data.scan") return { items: [] };
+    if (method === "data.batch") {
+      batchCalls += 1;
+      throw Object.assign(new Error("synthetic persistent storage failure"), { code: "E_STORAGE", retryable: true });
+    }
+    throw new Error(`Unexpected tool: ${method}`);
+  }
+
+  function deliver(event) {
+    let output = globalThis.onHaminnEvent(event);
+    for (let turn = 0; output?.actions?.length && turn < 8; turn += 1) {
+      const call = output.actions[0];
+      try { output = globalThis.onHaminnEvent({ type: "tool.result", callId: call.callId, ok: true, result: tool(call.method, call.params) }); }
+      catch (error) { output = globalThis.onHaminnEvent({ type: "tool.result", callId: call.callId, ok: false,
+        error: { code: error.code, retryable: error.retryable, message: error.message } }); }
+    }
+    return output;
+  }
+
+  assert.equal(deliver({ type: "start" }).state, "idle");
+  const result = deliver({ type: "goal.submit", intent: "完成合成任务" });
+  assert.equal(batchCalls, 1, "a failed checkpoint is not recursively written again");
+  assert.equal(result.state, "retryable-error");
+  assert.equal(result.userRequired, true);
+  assert.equal(result.category, "worker-state-persistence");
+});
+
 test("recovery gives the model pending operation details and does not replay an unknown effect", () => {
   const records = new Map();
   const intendedContent = "synthetic recovery text ".repeat(70);

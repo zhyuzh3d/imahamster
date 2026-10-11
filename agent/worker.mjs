@@ -67,6 +67,7 @@ let pending = "";
 let callSequence = 0;
 const workerEpoch = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 let activeCallId = null;
+let activeCallMethod = null;
 let deferredCall = null;
 let temporaryProviderText = null;
 let journalPending = [];
@@ -180,6 +181,7 @@ function action(method, params = {}) {
     actionParams[HOST_DEADLINE_PARAMETER] = ensureGoalDeadline();
   }
   activeCallId = callId;
+  activeCallMethod = method;
   return { actions: [{ callId, method, params: actionParams }] };
 }
 
@@ -2007,6 +2009,7 @@ function advanceAfterTool(event) {
 }
 
 globalThis.onHaminnEvent = event => {
+  let failedBridgeMethod = null;
   try {
     if (event?.type === "worker.queue-drained") return continueAfterWorkerQueueDrain();
     if (event?.type === "notification.posted") return acceptNotificationEvent(event);
@@ -2078,8 +2081,10 @@ globalThis.onHaminnEvent = event => {
         pending = "stale-tool-result-saved";
         return action("data.put", { collection: COLLECTION, key: ACTIVE_KEY, value: state });
       }
+      failedBridgeMethod = activeCallMethod;
       settleJournalWrite(event);
       activeCallId = null;
+      activeCallMethod = null;
       return advanceAfterTool(event);
     }
     return { state: "ignored" };
@@ -2093,6 +2098,19 @@ globalThis.onHaminnEvent = event => {
       pendingEventTaskControl = null;
       return { state: "retryable-error", eventTaskId: control?.eventTaskId,
         error: String(error?.message || error).slice(0, 240) };
+    }
+    if (event?.type === "tool.result" && !event.ok && ["data.put", "data.batch"].includes(failedBridgeMethod)) {
+      const reason = String(error?.message || error).slice(0, 240);
+      const errorCode = String(error?.code || "").slice(0, 48);
+      const signal = recordRecoveryFailure(state, {
+        stage: pending,
+        category: "worker-state-persistence",
+        code: errorCode || undefined,
+      });
+      appendTrace("recovery.failure-recorded", signal);
+      appendTrace("worker.persistence-failed", { stage: pending, code: errorCode || null });
+      return { state: "retryable-error", taskId: state?.taskId || null, userRequired: true,
+        category: "worker-state-persistence", stage: pending, error: reason };
     }
     if (pending.startsWith("event-task-control-") && pending !== "event-task-control-failure-saved" && pendingEventTaskControl) {
       return saveEventTaskControlFailure(error);
