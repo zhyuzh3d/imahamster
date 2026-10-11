@@ -563,7 +563,7 @@ JS 测试适合纯状态与组装；QuickJS/Android 仪器测试负责真实模�
 
 - 过程检查发现：关键 `data.put/data.batch` 失败以及 OST/EDT 幂等回执读取失败时，Worker 以前会把基础设施故障作为普通 JSON 返回。Haminn `WorkerHostService` 因此认为事件已正常处理并确认，可能丢失用户提交或未完成的通知/计时触发；如果尚未创建 `active-goal`，面板也因只看持久状态而隐藏失败。
 - Worker 现在将活动状态与关键事件回执的存储失败作为带阶段、错误码和可重试类别的运行异常抛出。Haminn `WorkerRuntime` 对可重试的 `data.get/put/batch` 存储错误、SQLite 锁冲突做最多两次短退避重试；耗尽后异常退出。Host 仅在 `deliver` 正常返回后确认持久事件，因此异常后原事件保留。Host 仪器测试覆盖异常不确认，Worker Runtime 仪器测试覆盖有限重试和耗尽后异常；既有动作回执和业务成功判定机制不变。
-- 新增独立 `ui/worker-panel-state.mjs`，统一判断中断面板可见性和当前 OST 未持久化时的重试资格，包括数据中仍有上一个终态 OST 的情况。用户重试会启动 Worker 处理仍在 Host 持久队列中的原事件，不重新提交相同 OST；确认对应活动记录或排队记录重新出现后才报告恢复。全量 `node --test` 110/110 通过；Haminn API 37 AVD 上 WorkerRuntime 与 Host 定向仪器用例合计 7/7 通过。DEV 版本提升为 `0.1.41 / code 42`，watcher 已发布到 revision 1128，但 target 未前台可见、刷新失败；ADB 仍只枚举模拟器，因此真机/微信行为尚未验收。
+- 新增独立 `ui/worker-panel-state.mjs`，统一判断中断面板可见性和当前 OST 未持久化时的重试资格，包括数据中仍有上一个终态 OST 的情况。用户重试会启动 Worker 处理仍在 Host 持久队列中的原事件，不重新提交相同 OST；确认对应活动记录或排队记录重新出现后才报告恢复。全量 `node --test` 110/110 通过；Haminn API 37 AVD 上 WorkerRuntime 与 Host 定向仪器用例合计 7/7 通过。DEV 版本提升为 `0.1.41 / code 42`，服务端文件清单确认完整树到 revision 1129 且关键文件哈希与本地一致，但 target 未前台可见、刷新失败；ADB 仍只枚举模拟器，因此真机/微信行为尚未验收。
 
 ## 11. 交付与完成判定
 
