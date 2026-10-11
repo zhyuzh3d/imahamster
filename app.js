@@ -826,6 +826,7 @@
         "screenshot.received": "收到截图", "model.requested": "请求模型", "model.responded": "模型返回",
         "decision": "模型决策", "model.error": "模型处理错误", "bridge.dispatched": "派发操作", "bridge.result": "操作回执", "worker.error": "执行错误",
         "recovery.scheduled": "安排恢复", "action-loop.repetition": "重复动作", "loop.repetition": "重复动作", "screen.unchanged": "画面未变",
+        "recovery.failure-recorded": "累计恢复故障",
         "action-loop.planning": "规划 AL", "loop.planning": "规划 AL", "action-loop.started": "AL 开始", "loop.started": "AL 开始", "action-loop.timeout": "AL 预算检查点", "loop.timeout": "AL 预算检查点", "action-loop.review": "LLM 复盘决定", "loop.review": "LLM 复盘决定",
         "goal.time-limit-exceeded": "目标超时停止", "goal.retry-attempt": "重新开始目标", "learning.review-complete": "经验整理完成", "learning.review-skipped": "跳过经验整理",
       };
@@ -840,6 +841,7 @@
         if (event.phase === "bridge.dispatched" || event.phase === "bridge.result") return `${event.actionType || "操作"}${event.label ? `「${event.label}」` : ""}${event.phase === "bridge.result" ? `，completed=${event.completed} / accepted=${event.accepted}${event.targeting ? ` / targeting=${event.targeting}` : ""}` : ""}`;
         if (event.phase === "worker.error" || event.phase === "model.error") return `${event.stage ? `${event.stage}：` : ""}${event.code ? `[${event.code}] ` : ""}${event.message || "未知错误"}`;
         if (event.phase === "recovery.scheduled") return `${event.mode === "reobserve" ? "立即重新观察" : "退避后重试"}（第 ${event.attempt} 次）`;
+        if (event.phase === "recovery.failure-recorded") return `${event.stage || "未知阶段"} / ${event.category || "未知错误"}${event.code ? ` [${event.code}]` : ""}（累计 ${event.total || event.count || 1} 次）`;
         if (event.phase === "loop.repetition" || event.phase === "action-loop.repetition" || event.phase === "screen.unchanged") return `连续 ${event.count} 次`;
         if (event.model) return event.model;
         return "";

@@ -1445,6 +1445,71 @@ test("malformed actions recover and the LLM completion judgment is stored withou
   assert.ok(active.trace.some((event) => event.phase === "recovery.scheduled" && event.mode === "backoff"));
 });
 
+test("retryable runtime bridge failures reobserve through the LLM instead of becoming a synthetic stop", () => {
+  const records = new Map();
+  const provider = { baseUrl: "https://model.example", apiKey: "x".repeat(24), model: "vision-model" };
+  const prompts = [];
+  let failExperienceScan = true;
+
+  function tool(method, params) {
+    if (method === "data.batch") {
+      for (const item of params.operations) records.set(`${item.collection}:${item.key}`, { value: item.value, revision: "1" });
+      return { results: [] };
+    }
+    if (method === "data.get") return { value: params.key === "provider" ? provider : records.get(`${params.collection}:${params.key}`)?.value };
+    if (method === "data.scan") {
+      if (params.collection === "knowledge" && params.prefix === "experience:" && failExperienceScan) {
+        failExperienceScan = false;
+        throw Object.assign(new Error("synthetic transient store network failure"), { code: "E_NETWORK", retryable: true });
+      }
+      return { items: [] };
+    }
+    if (method === "data.put") {
+      records.set(`${params.collection}:${params.key}`, { value: params.value, revision: "1" });
+      return { revision: "1" };
+    }
+    if (method === "interaction.capture") return { mime: "image/jpeg", dataBase64: "c3ludGhldGljLWZyYW1l" };
+    if (method === "network.request") {
+      const body = JSON.parse(params.bodyText);
+      prompts.push(body.messages.map(message => typeof message.content === "string" ? message.content
+        : message.content?.map?.(part => part.text || "").join(" ") || "").join("\n"));
+      return modelCall(params, () => ({ state: "done", evidence: "重新观察后，LLM 判断合成目标已完成" }));
+    }
+    if (method === "worker.wait") return { waitedMs: params.ms };
+    throw new Error(`Unexpected tool: ${method}`);
+  }
+
+  function deliver(event) {
+    let output = globalThis.onHaminnEvent(event);
+    for (let turn = 0; output?.actions?.length && turn < 48; turn += 1) {
+      const call = output.actions[0];
+      try { output = globalThis.onHaminnEvent({ type: "tool.result", callId: call.callId, ok: true, result: tool(call.method, call.params) }); }
+      catch (error) { output = globalThis.onHaminnEvent({ type: "tool.result", callId: call.callId, ok: false,
+        error: { code: error.code, retryable: error.retryable, message: error.message } }); }
+    }
+    return output;
+  }
+
+  assert.equal(deliver({ type: "start" }).state, "idle");
+  const interrupted = deliver({ type: "goal.submit", intent: "完成合成任务" });
+  const waitingState = records.get("agent-runtime:active-goal").value;
+  assert.equal(interrupted.state, "waiting");
+  assert.equal(interrupted.userRequired, undefined, "transient runtime failures recover automatically");
+  assert.equal(waitingState.lastDecision?.state, undefined, "a Worker error must not be fabricated as an LLM stop decision");
+  assert.equal(waitingState.recoverySignals.total, 1);
+  assert.equal(waitingState.recoverySignals.categories[0].stage, "knowledge-scan");
+  assert.ok(waitingState.trace.some(event => event.phase === "recovery.scheduled" && event.mode === "runtime-reobserve"));
+
+  const completed = deliver({ type: "tick" });
+  const active = records.get("agent-runtime:active-goal").value;
+  assert.equal(completed.state, "done");
+  assert.equal(active.state, "done");
+  assert.equal(active.recoverySignals.total, 1, "successful LLM decisions preserve the failure history");
+  assert.ok(prompts.some(prompt => /本 OST 累计模型\/屏幕故障 1 次/.test(prompt)),
+    "the LLM receives the runtime failure before deciding how to continue");
+  assert.equal(active.trace.some(event => event.phase === "decision" && event.decision === "stop"), false);
+});
+
 test("recovery gives the model pending operation details and does not replay an unknown effect", () => {
   const records = new Map();
   const intendedContent = "synthetic recovery text ".repeat(70);

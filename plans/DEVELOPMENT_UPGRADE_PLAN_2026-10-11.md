@@ -556,8 +556,8 @@ JS 测试适合纯状态与组装；QuickJS/Android 仪器测试负责真实模�
 
 - 通用缺口：Worker 虽然记录模型错误、相同动作和未变化截图，但 CAE 没有把重复证据、连续恢复次数和故障类别累计交给 LLM；合法决策会清掉“连续自动恢复”次数，若没有独立累计计数，模型难以判断是否应改变路径或请求帮助。
 - 新增 `agent/ho/recovery-signals.mjs`，按阶段/错误分类累计 OST 内的模型与屏幕故障，限制分类数量和计数，并只保存规范化类别、阶段及错误码，不复制错误正文、提示词或用户内容。Worker 每次进入恢复路径前记录该信号；CAE 将累计故障、相同进展证据、重复动作、连续相同截图及当前连续恢复次数组成有界的运行摘要。
-- 这些字段只供 LLM 反思、重新规划或续行；HO 不据此判断业务失败或任务成功。LLM 选择 restart 时，Worker 在重置连续信号前把被清零的计数写入完整轨迹，累计故障分类跨 AL 和 restart 保留。日志可由 Worker Journal 增量查看。
-- 新增分类累积/上限/去敏测试、CAE 信号组装测试，并扩展 Worker 集成用例验证合法模型决策后累计错误仍进入后续动作上下文。全量 `node --test` 102/102 通过，Worker/CAE/HO 语法检查和 `git diff --check` 通过；DEV happ 版本递增至 `0.1.40 / code 41`。活动 watcher 已发布 revision 1104，但运行态仍为 `not-visible`、刷新失败；ADB 重启和 USB 查询仍只看到 emulator，因此本条仅是代码与开发树验证，真机/微信行为尚未验收。
+- 这些字段只供 LLM 反思、重新规划或续行；HO 不据此判断业务失败或任务成功。LLM 选择 restart 时，Worker 在重置连续信号前把被清零的计数写入完整轨迹，累计故障分类跨 AL 和 restart 保留。无法归入模型/屏幕阶段的可重试 Bridge/Worker 故障会有界退避后重新观察，再把现场交回 LLM；不可重试或耗尽连续恢复次数时转为需用户处理的 waiting，不伪造 LLM stop。若关键状态写入本身失败，Worker 返回可重试的持久化错误结果并停止重复写入。日志可由 Worker Journal 增量查看。
+- 新增分类累积/上限/去敏测试、CAE 信号组装测试，并扩展 Worker 集成用例验证合法模型决策后累计错误仍进入后续动作上下文，以及一次性 Bridge 存储故障经重新观察后由 LLM 完成 OST。最终全量 `node --test` 103/103 通过，app/Worker/CAE/HO 语法检查及 `git diff --check` 通过；DEV happ 版本为 `0.1.40 / code 41`。活动 watcher 已发布至 revision 1108，但运行态仍为 `not-visible`、刷新失败；ADB 重启和 USB 查询仍只看到 emulator，因此本条仅是代码与开发树验证，真机/微信行为尚未验收。
 
 ## 11. 交付与完成判定
 

@@ -1604,7 +1604,6 @@ function beginObserve() {
 }
 
 function advanceAfterTool(event) {
-  if (pending === "error-save") return { state: "failed", error: state?.progress || "后台任务失败" };
   const finishingGlobalActionReceipt = !!state?.pendingGlobalAction ||
     (pending === "action-result" && ["back", "home"].includes(state?.pendingAction?.type));
   if (state && !["unclassified", "event-match"].includes(state.taskType) && !terminal(state.state) && !["goal-time-limit-saved", "goal-submit-receipt-read"].includes(pending) && goalDeadlineExpired() &&
@@ -1941,6 +1940,8 @@ function advanceAfterTool(event) {
       pending = "completed-queue-read";
       return action("data.scan", { collection: "inbox", prefix: "q:", limit: 1 });
     }
+    case "runtime-error-saved":
+      return { state: "waiting", progress: state.progress, userRequired: true, category: "worker-runtime" };
     case "goal-time-limit-saved": return { state: "failed", progress: state.progress, userRequired: true };
     case "model-recovery-saved":
       return scheduleTaskWait(1000, "model-recovery", "recovery-wait-result");
@@ -2083,6 +2084,10 @@ globalThis.onHaminnEvent = event => {
     }
     return { state: "ignored" };
   } catch (error) {
+    if (["user-wait-saved", "runtime-error-saved", "goal-time-limit-saved"].includes(pending)) {
+      return { state: "retryable-error", taskId: state?.taskId || null, userRequired: true,
+        category: "worker-state-persistence", error: String(error?.message || error).slice(0, 240) };
+    }
     if (pending === "event-task-control-failure-saved") {
       const control = pendingEventTaskControl;
       pendingEventTaskControl = null;
@@ -2212,8 +2217,28 @@ globalThis.onHaminnEvent = event => {
         state.pendingOperation.updatedAt = Date.now();
         rememberPendingOperation(state);
       }
-      storeDecision({ state: "stop", reason, evidence: reason });
-      pending = "error-save";
+      const signal = recordRecoveryFailure(state, {
+        stage: pending,
+        category: error?.category || "worker-runtime",
+        code: errorCode || undefined,
+      });
+      appendTrace("recovery.failure-recorded", signal);
+      state.recoveryAttempts = Number(state.recoveryAttempts || 0) + 1;
+      state.lastModelError = reason;
+      state.lastModelErrorCode = errorCode || null;
+      const retryable = error?.retryable !== false;
+      if (!retryable || state.recoveryAttempts >= MAX_RECOVERY_ATTEMPTS) {
+        const category = retryable ? "recovery-exhausted" : error?.category || "worker-runtime";
+        return pauseForUser(`${retryable ? `连续 ${state.recoveryAttempts} 次恢复仍未解决` : "后台运行遇到不可自动恢复的异常"}：${reason}。进度已保存，可检查日志后继续。`, category);
+      }
+      finishActiveSegment();
+      state.state = "waiting";
+      state.waiting = { reason, category: "worker-runtime", since: Date.now(), automatic: true };
+      state.progress = `后台执行阶段遇到异常；将重新观察并交由 LLM 从当前现场继续：${reason}`;
+      appendTrace("recovery.scheduled", { attempt: state.recoveryAttempts, mode: "runtime-reobserve", maxAttempts: MAX_RECOVERY_ATTEMPTS });
+      state.revision = Number(state.revision || 0) + 1;
+      state.lastProgressAt = Date.now();
+      pending = "recovery-wait-saved";
       const operations = updateGoalAndTask(state.lastDecision);
       if (state.pendingOperation) operations.unshift(record("operations", `o:${state.pendingOperation.operationId}`, state.pendingOperation));
       return action("data.batch", { operations });
