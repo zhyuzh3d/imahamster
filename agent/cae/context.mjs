@@ -1,5 +1,6 @@
 import { formatToolNames } from "../te/catalog.mjs";
 import { pendingOperationContext } from "../ho/operations.mjs";
+import { recoverySignalSummary } from "../ho/recovery-signals.mjs";
 
 /** Assemble bounded, task-specific context for the action model request. */
 export function buildActionContext(state, {
@@ -79,6 +80,10 @@ export function buildActionContext(state, {
   const lastError = state.lastModelError
     ? `最近执行错误：${state.lastModelErrorCode ? `${state.lastModelErrorCode}：` : ""}${state.lastModelError}。`
     : "";
+  const recoverySignals = recoverySignalSummary(state);
+  const runtimeSignals = recoverySignals.total || state.noProgressCount || state.repeatedActionCount || state.sameFrameCount || state.recoveryAttempts
+    ? `运行恢复信号（只供你反思、调整策略，不代表任务结果或失败）：相同进展证据连续 ${Math.max(0, Number(state.noProgressCount) || 0)} 次；相同动作连续 ${Math.max(0, Number(state.repeatedActionCount) || 0)} 次；连续相同截图 ${Math.max(0, Number(state.sameFrameCount) || 0)} 次；当前连续自动恢复尝试 ${Math.max(0, Number(state.recoveryAttempts) || 0)} 次；本 OST 累计模型/屏幕故障 ${recoverySignals.total} 次${recoverySignals.overflow ? `（其中 ${recoverySignals.overflow} 次未展开分类）` : ""}${recoverySignals.categories.length ? `，按阶段/分类统计：${JSON.stringify(recoverySignals.categories)}` : ""}。合法决策不会清除 OST 累计故障；进展改变会清除连续无进展计数，成功决策可清除连续自动恢复次数。`
+    : "";
 
-  return `当前 OST：${state.intent}\n任务进度：${state.progress || "尚未开始"}；决策步数 ${state.step || 0}；当前 AL ${actionLoop.index || 1}，已用 ${Math.floor(actionLoopElapsedMs / 60_000)} 分钟/预算 ${actionLoop.budgetMinutes || defaultActionLoopBudgetMinutes} 分钟；OST 硬时限剩余 ${goalRemainingMinutes} 分钟。${trigger}${lastError}${inputRecovery}${operation}\n${loopHistory}近期操作记录：${JSON.stringify(history)}\n${identityPersona}\n${behaviorPatterns}\n${experiences}\n${memories}\n${memoryLookups}\n${toolCandidates}\n${tools}`;
+  return `当前 OST：${state.intent}\n任务进度：${state.progress || "尚未开始"}；决策步数 ${state.step || 0}；当前 AL ${actionLoop.index || 1}，已用 ${Math.floor(actionLoopElapsedMs / 60_000)} 分钟/预算 ${actionLoop.budgetMinutes || defaultActionLoopBudgetMinutes} 分钟；OST 硬时限剩余 ${goalRemainingMinutes} 分钟。${trigger}${lastError}${runtimeSignals}${inputRecovery}${operation}\n${loopHistory}近期操作记录：${JSON.stringify(history)}\n${identityPersona}\n${behaviorPatterns}\n${experiences}\n${memories}\n${memoryLookups}\n${toolCandidates}\n${tools}`;
 }

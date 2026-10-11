@@ -20,6 +20,7 @@ import {
 } from "./ho/global-action-receipts.mjs";
 import { assertEventId, createEventReceipt, eventReceiptKey } from "./ho/events.mjs";
 import { applyCurrentOperationOutcome, ensurePendingOperationHistory, rememberPendingOperation } from "./ho/operations.mjs";
+import { recordRecoveryFailure } from "./ho/recovery-signals.mjs";
 import {
   createEventTask,
   notificationInboxKey,
@@ -418,6 +419,7 @@ function activeGoalRecord() {
     goalId, taskId, intent: "", state: "active", taskType: "unclassified", taskKind: null, step: 0, revision: 1, createdAt: now,
     lastProgressAt: now, progress: "目标已接收，等待首轮屏幕观察。", waiting: null,
     activeElapsedMs: 0, activeSegmentStartedAt: now, recoveryAttempts: 0,
+    recoverySignals: { total: 0, overflow: 0, categories: [] },
     pendingOperations: [],
   };
 }
@@ -1236,6 +1238,11 @@ function applyActionLoopReview(text) {
     startActiveSegment();
   } else {
     if (review.choice === "restart") {
+      const clearedSignals = {
+        noProgressCount: Number(state.noProgressCount || 0),
+        repeatedActionCount: Number(state.repeatedActionCount || 0),
+        sameFrameCount: Number(state.sameFrameCount || 0),
+      };
       state.noProgressCount = 0;
       state.repeatedActionCount = 0;
       state.lastActionSignature = null;
@@ -1245,7 +1252,7 @@ function applyActionLoopReview(text) {
       state.sameFrameCount = 0;
       state.lastFrameFingerprint = null;
       state.restartCount = Number(state.restartCount || 0) + 1;
-      appendTrace("task.context-restarted", { count: state.restartCount, reason });
+      appendTrace("task.context-restarted", { count: state.restartCount, reason, clearedSignals });
     }
     finishActionLoop(state, "completed-timeout-review");
     state.actionLoop.planReason = review.choice === "restart" ? "timeout-review-restart" : "timeout-review-new-loop";
@@ -2093,6 +2100,14 @@ globalThis.onHaminnEvent = event => {
       const providerFailure = ["get-provider", "resume-provider", "provider-result", "provider-file-read", "provider-file-cleanup"].includes(pending);
       const modelFailure = providerFailure;
       const screenFailure = pending === "capture-result" || pending === "action-result";
+      if (screenFailure || (modelFailure && state.providerPurpose !== "learning")) {
+        const signal = recordRecoveryFailure(state, {
+          stage: pending,
+          category: error?.category || (modelFailure ? "model-response" : "screen-interaction"),
+          code: errorCode || undefined,
+        });
+        appendTrace("recovery.failure-recorded", signal);
+      }
       if (modelFailure && state.providerPurpose === "action" && actionLoopExpired()) {
         appendTrace("action-loop.action-request-failed-after-budget", { stage: pending, message: reason, code: errorCode || null });
         return beginActionLoopReviewCapture();

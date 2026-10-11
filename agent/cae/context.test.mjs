@@ -19,6 +19,13 @@ test("CAE assembles a bounded action context without mutating the OST", () => {
     pendingOperationId: "op-1",
     pendingOperation: { operationId: "op-1", status: "unknown", intendedContent: "你好".repeat(5000) },
     inputRecovery: { stage: "focus-required", code: "E_CONFLICT" },
+    noProgressCount: 3,
+    repeatedActionCount: 2,
+    sameFrameCount: 4,
+    recoveryAttempts: 1,
+    recoverySignals: { total: 2, overflow: 0, categories: [
+      { stage: "provider-result", category: "model-response", count: 2 },
+    ] },
   };
   const before = structuredClone(state);
 
@@ -29,6 +36,13 @@ test("CAE assembles a bounded action context without mutating the OST", () => {
   assert.match(context, /当前 AL 2，已用 2 分钟/);
   assert.match(context, /输入故障恢复/);
   assert.match(context, /待核实操作/);
+  assert.match(context, /相同进展证据连续 3 次/);
+  assert.match(context, /相同动作连续 2 次/);
+  assert.match(context, /连续相同截图 4 次/);
+  assert.match(context, /当前连续自动恢复尝试 1 次/);
+  assert.match(context, /本 OST 累计模型\/屏幕故障 2 次/);
+  assert.match(context, /provider-result/);
+  assert.match(context, /合法决策不会清除 OST 累计故障/);
   assert.match(context, /经验 0/);
   assert.doesNotMatch(context, /经验 5/);
   assert.match(context, /小明记忆 0/);

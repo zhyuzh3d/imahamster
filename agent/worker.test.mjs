@@ -1372,6 +1372,7 @@ test("the LLM may report completion with an uncertain effect and the Worker reco
 test("malformed actions recover and the LLM completion judgment is stored without a confidence threshold", () => {
   const records = new Map();
   const provider = { baseUrl: "https://model.example", apiKey: "x".repeat(24), model: "vision-model" };
+  const prompts = [];
   let taps = 0;
   let modelCalls = 0;
 
@@ -1388,6 +1389,9 @@ test("malformed actions recover and the LLM completion judgment is stored withou
     }
     if (method === "interaction.capture") return { mime: "image/jpeg", dataBase64: "c3ludGhldGljLWZyYW1l" };
     if (method === "network.request") {
+      const body = JSON.parse(params.bodyText);
+      prompts.push(body.messages.map(message => typeof message.content === "string" ? message.content
+        : message.content?.map?.(part => part.text || "").join(" ") || "").join("\n"));
       return modelCall(params, () => {
         modelCalls += 1;
         return modelCalls === 1
@@ -1428,6 +1432,11 @@ test("malformed actions recover and the LLM completion judgment is stored withou
   assert.equal(modelCalls, 4);
   assert.equal(records.get(`tasks:t:${active.taskId}`).value.state, "done");
   assert.equal(active.state, "done");
+  assert.equal(active.recoverySignals.total, 2, "cumulative failures survive subsequent valid model decisions");
+  assert.equal(active.recoverySignals.categories[0].stage, "provider-result");
+  assert.equal(active.recoverySignals.categories[0].count, 2);
+  assert.ok(prompts.some(prompt => /本 OST 累计模型\/屏幕故障 2 次/.test(prompt)),
+    "the LLM sees cumulative recovery failures on a later action request");
   assert.equal(active.trace.find((event) => event.phase === "decision" && event.decision === "done")?.evidence,
     "根据最终画面和操作历史，我判断合成目标已完成");
   assert.equal(Object.hasOwn(active.trace.find((event) => event.phase === "decision" && event.decision === "done"), "confidence"), false);

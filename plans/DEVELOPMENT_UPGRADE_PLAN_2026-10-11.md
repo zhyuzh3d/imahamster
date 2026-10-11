@@ -552,6 +552,13 @@ JS 测试适合纯状态与组装；QuickJS/Android 仪器测试负责真实模�
 - `app.js` 仅协调模块挂载、Bridge ready 与当前 OST ID。新增格式化、截断边界及分页轮询测试；`node --test` 99/99、脚本语法与 `git diff --check` 通过。DEV watcher 已同步到 revision 1100、tree hash `e4eb1c73…`；但 refresh 仍失败、runtime `not-visible`，ADB 仍只有模拟器，因此只是开发树同步，不是手机运行验收。
 - 同步时发现单次 `prepare-dir` 与活动 `develop-dir` watcher 并发会因 revision 落后返回 `E_CONFLICT`；watcher 后续自行追上并发布到 1100。后续一个时段只使用一个同步写入者，避免再次竞争。手机 USB/ADB 与 DEV 前台运行时恢复后再验证增量页游标和真实事件量。
 
+### 10.31 LLM 可见的跨恢复韧性信号（2026-10-11）
+
+- 通用缺口：Worker 虽然记录模型错误、相同动作和未变化截图，但 CAE 没有把重复证据、连续恢复次数和故障类别累计交给 LLM；合法决策会清掉“连续自动恢复”次数，若没有独立累计计数，模型难以判断是否应改变路径或请求帮助。
+- 新增 `agent/ho/recovery-signals.mjs`，按阶段/错误分类累计 OST 内的模型与屏幕故障，限制分类数量和计数，并只保存规范化类别、阶段及错误码，不复制错误正文、提示词或用户内容。Worker 每次进入恢复路径前记录该信号；CAE 将累计故障、相同进展证据、重复动作、连续相同截图及当前连续恢复次数组成有界的运行摘要。
+- 这些字段只供 LLM 反思、重新规划或续行；HO 不据此判断业务失败或任务成功。LLM 选择 restart 时，Worker 在重置连续信号前把被清零的计数写入完整轨迹，累计故障分类跨 AL 和 restart 保留。日志可由 Worker Journal 增量查看。
+- 新增分类累积/上限/去敏测试、CAE 信号组装测试，并扩展 Worker 集成用例验证合法模型决策后累计错误仍进入后续动作上下文。全量 `node --test` 102/102 通过，Worker/CAE/HO 语法检查和 `git diff --check` 通过；DEV happ 版本递增至 `0.1.40 / code 41`。活动 watcher 已发布 revision 1104，但运行态仍为 `not-visible`、刷新失败；ADB 重启和 USB 查询仍只看到 emulator，因此本条仅是代码与开发树验证，真机/微信行为尚未验收。
+
 ## 11. 交付与完成判定
 
 ImHamster 与 Haminn 独立提交、验证和推送；每次提交前核对各自 Git 根与 origin，保留无关工作区改动。宿主新增合同需同步 SDK/能力文档/实际实现，消费者只接入确实支持的能力。
