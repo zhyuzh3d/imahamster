@@ -2975,6 +2975,98 @@ test("priority user cancel is handled before Worker startup and clears every que
   assert.equal(deliver({ type: "start" }).state, "cancelled");
 });
 
+test("a user pause CAS conflict reloads the current OST and applies the command without losing progress", async () => {
+  await import(`./worker.mjs?goal-control-cas=${Date.now()}`);
+  const records = new Map();
+  const active = { goalId: "g-control-cas", taskId: "t-control-cas", runId: "run-control-cas",
+    intent: "执行合成 OST", state: "active", taskType: "one-shot", taskKind: "OST", revision: 4,
+    step: 3, journalSequence: 0, trace: [], waiting: null, progress: "旧进度" };
+  records.set("agent-runtime:active-goal", { value: active, revision: "active-r1" });
+  records.set("goals:g:g-control-cas", { value: { goalId: active.goalId, state: "active", revision: 4 }, revision: "goal-r1" });
+  records.set("tasks:t:t-control-cas", { value: { taskId: active.taskId, goalId: active.goalId,
+    state: "running", revision: 4 }, revision: "task-r1" });
+  let conflictOnce = true;
+
+  function tool(method, params) {
+    if (method === "data.get") return records.get(`${params.collection}:${params.key}`) || null;
+    if (method === "data.scan") return { items: [] };
+    if (method === "data.batch") {
+      const finalControl = params.operations.some(operation => operation.collection === "agent-runtime" &&
+        operation.key === "active-goal") && params.operations.some(operation => operation.collection === "agent-runtime" &&
+        operation.key.startsWith("event:"));
+      if (finalControl && conflictOnce) {
+        conflictOnce = false;
+        records.set("agent-runtime:active-goal", { value: { ...active, revision: 5, step: 9,
+          progress: "并发推进后的最新进度" }, revision: "active-r2" });
+        return { __toolError: { code: "E_CONFLICT", message: "active-goal revision changed" } };
+      }
+      return persistMockBatch(records, params);
+    }
+    throw new Error(`Unexpected tool: ${method}`);
+  }
+
+  let output = globalThis.onHaminnEvent({ type: "goal.control", eventId: "pause-control-cas", command: "pause" });
+  for (let turn = 0; output?.actions?.length && turn < 40; turn += 1) {
+    const call = output.actions[0];
+    const result = tool(call.method, call.params);
+    output = result?.__toolError
+      ? globalThis.onHaminnEvent({ type: "tool.result", callId: call.callId, ok: false, error: result.__toolError })
+      : globalThis.onHaminnEvent({ type: "tool.result", callId: call.callId, ok: true, result });
+  }
+  const saved = records.get("agent-runtime:active-goal").value;
+  assert.equal(output.controlApplied, true);
+  assert.equal(saved.state, "paused");
+  assert.equal(saved.step, 9, "recovery must apply pause to the latest durable OST instead of restoring its stale snapshot");
+  assert.equal(saved.progress, "用户已暂停任务；继续时先重新观察屏幕并核对未完成操作。");
+  assert.equal(records.get(`agent-runtime:${eventReceiptKey("pause-control-cas")}`).value.state, "completed");
+});
+
+test("a cancellation queue-page CAS conflict rescans entries without double-counting them", async () => {
+  await import(`./worker.mjs?goal-control-queue-cas=${Date.now()}`);
+  const records = new Map();
+  const active = { goalId: "g-queue-cas", taskId: "t-queue-cas", runId: "run-queue-cas",
+    intent: "取消合成任务", state: "active", taskType: "one-shot", taskKind: "OST", revision: 2,
+    step: 1, journalSequence: 0, trace: [], waiting: null };
+  records.set("agent-runtime:active-goal", { value: active, revision: "active-r1" });
+  records.set("goals:g:g-queue-cas", { value: { goalId: active.goalId, state: "active", revision: 2 }, revision: "goal-r1" });
+  records.set("tasks:t:t-queue-cas", { value: { taskId: active.taskId, goalId: active.goalId,
+    state: "running", revision: 2 }, revision: "task-r1" });
+  for (let index = 0; index < 2; index += 1) records.set(`inbox:q:queue-cas-${index}`, {
+    value: { type: "goal.submit", intent: `待取消目标 ${index}` }, revision: `queue-r${index}` });
+  let conflictOnce = true;
+
+  function tool(method, params) {
+    if (method === "data.get") return records.get(`${params.collection}:${params.key}`) || null;
+    if (method === "data.scan") return { items: [...records.entries()]
+      .filter(([key]) => key.startsWith(`${params.collection}:${params.prefix}`))
+      .sort(([left], [right]) => left.localeCompare(right)).slice(0, params.limit)
+      .map(([key, value]) => ({ key: key.slice(params.collection.length + 1), ...value })) };
+    if (method === "data.batch") {
+      const pageDelete = params.operations.some(operation => operation.collection === "inbox" && operation.op === "delete");
+      if (pageDelete && conflictOnce) {
+        conflictOnce = false;
+        return { __toolError: { code: "E_CONFLICT", message: "queue page changed" } };
+      }
+      return persistMockBatch(records, params);
+    }
+    throw new Error(`Unexpected tool: ${method}`);
+  }
+
+  let output = globalThis.onHaminnEvent({ type: "goal.control", eventId: "cancel-control-queue-cas", command: "cancel" });
+  for (let turn = 0; output?.actions?.length && turn < 60; turn += 1) {
+    const call = output.actions[0];
+    const result = tool(call.method, call.params);
+    output = result?.__toolError
+      ? globalThis.onHaminnEvent({ type: "tool.result", callId: call.callId, ok: false, error: result.__toolError })
+      : globalThis.onHaminnEvent({ type: "tool.result", callId: call.callId, ok: true, result });
+  }
+  assert.equal(output.controlApplied, true);
+  assert.equal(output.queuedCancelled, 2);
+  assert.equal(records.get(`agent-runtime:${eventReceiptKey("cancel-control-queue-cas")}`).value.queuedCancelled, 2);
+  assert.equal([...records.keys()].filter(key => key.startsWith("inbox:q:")).length, 0);
+  assert.equal(records.get("agent-runtime:active-goal").value.state, "cancelled");
+});
+
 test("Worker restart resumes dependency scheduling after a durable task-done decision", async () => {
   await import(`./worker.mjs?task-done-restart=${Date.now()}`);
   const now = Date.now();

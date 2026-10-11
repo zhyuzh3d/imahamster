@@ -64,6 +64,7 @@ const NOTIFICATION_INBOX_PREFIX = "n:";
 const MAX_RECOVERY_ATTEMPTS = 12;
 const MAX_POST_TASK_QUEUE_RECOVERY_ATTEMPTS = 8;
 const MAX_STORAGE_CONFLICT_RECOVERIES = 3;
+const GOAL_CONTROL_CONFLICT_STAGES = new Set(["goal-control-queue-page-saved", "goal-control-final-saved"]);
 const EVENT_INBOX_REPLAY_STAGES = new Set([
   "event-match-settled", "event-match-trigger-created", "timer-event-settled", "timer-trigger-created",
 ]);
@@ -85,6 +86,7 @@ const CRITICAL_STATE_READ_STAGES = new Set([
   "event-task-subscription-conflict-task-read",
   "event-task-subscription-conflict-goal-read",
   "event-task-subscription-conflict-task-record-read", "event-task-subscription-conflict-active-read",
+  "goal-control-conflict-receipt-read", "goal-control-conflict-active-read",
   "goal-submit-receipt-read", "notification-receipt-read", "timer-receipt-read",
   "event-task-control-receipt-read", "event-task-control-task-read",
   "goal-control-receipt-read", "goal-control-active-read", "goal-control-goal-read", "goal-control-task-read",
@@ -280,6 +282,11 @@ function beginStorageConflictRecovery(error, method, failedStage) {
   journalPending = [];
   journalInFlight = [];
   journalCommitCallId = null;
+  if (GOAL_CONTROL_CONFLICT_STAGES.has(stage) && pendingGoalControl) {
+    storageConflictContext.kind = "goal-control";
+    pending = "goal-control-conflict-receipt-read";
+    return action("data.get", { collection: COLLECTION, key: eventReceiptKey(pendingGoalControl.eventId) });
+  }
   if (stage.startsWith("event-task-control-") && pendingEventTaskControl) {
     storageConflictContext.kind = "event-task-control";
     pending = "event-task-control-conflict-receipt-read";
@@ -787,6 +794,7 @@ function saveGoalControlFailure(error) {
 function continueAfterGoalControl() {
   const control = pendingGoalControl;
   pendingGoalControl = null;
+  storageConflictContext = null;
   controlNeedsQueueDrain = true;
   return { state: control?.receipt?.resultState || "idle", controlApplied: control?.receipt?.outcome === "applied",
     duplicate: false, eventId: control?.eventId, queuedCancelled: Number(control?.receipt?.queuedCancelled || 0),
@@ -2111,8 +2119,9 @@ function advanceAfterTool(event) {
   if (state && !["unclassified", "event-match"].includes(state.taskType) && !terminal(state.state) && !["goal-time-limit-saved", "goal-submit-receipt-read"].includes(pending) && goalDeadlineExpired() &&
       !finishingGlobalActionReceipt && !GLOBAL_ACTION_RECEIPT_STAGES.has(pending)) return failExpiredGoal();
   const result = resultOf(event);
-  if (hasLifecycleWrite(activeCallMethod, activeCallParams) || EVENT_INBOX_REPLAY_STAGES.has(pending) ||
-      (pending === "event-task-control-failure-saved" && activeCallMethod === "data.put")) {
+  if (EVENT_INBOX_REPLAY_STAGES.has(pending) ||
+      (pending === "event-task-control-failure-saved" && activeCallMethod === "data.put") ||
+      GOAL_CONTROL_CONFLICT_STAGES.has(pending)) {
     storageConflictAttempts = 0;
   }
   if (POST_TASK_QUEUE_READ_STAGES.has(pending) && state?.postTaskQueueRecovery?.kind === "inbox-drain" &&
@@ -2192,6 +2201,43 @@ function advanceAfterTool(event) {
         control.queuedCancelled = Number(receipt.queuedCancelled || 0);
       }
       return readGoalControlActive();
+    }
+    case "goal-control-conflict-receipt-read": {
+      const control = pendingGoalControl;
+      const receipt = result?.value;
+      if (!control) throw new Error("用户任务控制冲突恢复上下文已丢失");
+      if (receipt) {
+        if (receipt.eventId !== control.eventId || receipt.type !== "goal.control" || receipt.command !== control.command) {
+          throw new Error("用户任务控制冲突回执与原命令不匹配");
+        }
+        if (receipt.state === "completed") {
+          pendingGoalControl = null;
+          storageConflictContext = null;
+          controlNeedsQueueDrain = true;
+          return { state: receipt.resultState || "idle", duplicate: true, eventId: control.eventId,
+            queuedCancelled: Number(receipt.queuedCancelled || 0), receipt };
+        }
+        if (!["prepared", "retryable-error"].includes(receipt.state)) {
+          throw new Error("用户任务控制冲突回执状态无效");
+        }
+        control.receipt = receipt;
+        control.queuedCancelled = Number(receipt.queuedCancelled || 0);
+      } else {
+        control.receipt = null;
+        if (storageConflictContext?.stage === "goal-control-queue-page-saved") control.queuedCancelled = 0;
+      }
+      control.activeRecord = null;
+      control.goalRecord = null;
+      control.taskRecord = null;
+      control.plan = null;
+      pending = "goal-control-conflict-active-read";
+      return action("data.get", { collection: COLLECTION, key: ACTIVE_KEY });
+    }
+    case "goal-control-conflict-active-read": {
+      const control = pendingGoalControl;
+      if (!control) throw new Error("用户任务控制冲突恢复上下文已丢失");
+      control.activeRecord = result;
+      return control.command === "cancel" ? readGoalControlQueue() : readGoalControlGoal();
     }
     case "goal-control-active-read": {
       const control = pendingGoalControl;
@@ -2869,7 +2915,8 @@ globalThis.onHaminnEvent = event => {
       failedBridgeMethod = activeCallMethod;
       settleJournalWrite(event);
       if (!event.ok && event.error?.code === "E_CONFLICT" &&
-          (hasLifecycleWrite(activeCallMethod, activeCallParams) || EVENT_INBOX_REPLAY_STAGES.has(pending))) {
+          (hasLifecycleWrite(activeCallMethod, activeCallParams) || EVENT_INBOX_REPLAY_STAGES.has(pending) ||
+            GOAL_CONTROL_CONFLICT_STAGES.has(pending))) {
         const failedMethod = activeCallMethod;
         const failedStage = pending;
         activeCallId = null;
