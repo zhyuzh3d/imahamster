@@ -690,6 +690,12 @@ JS 测试适合纯状态与组装；QuickJS/Android 仪器测试负责真实模�
 - 修改集中在 `agent/learning/maintenance.mjs`、Worker 状态机、`agent/ho/records.mjs` 与工作面板状态模块。全量 Node 测试 159/159 通过；入口、Worker、学习模块、记录/UI 模块语法检查、`haminn.json` 解析与 `git diff --check` 通过。版本为 `0.1.44 / code 45`。
 - 设备验收未完成：用户已确认手机连接；macOS IOUSB 能识别 CMA-AN00，但当前只观察到 MTP/HDB 接口，`adb devices -l` 仍仅显示 `emulator-5554`，所以不是物理断连，而是 ADB transport/调试授权尚未建立。Haminn DEV watcher 存活且继续发布源码，但 app runtime `not-visible`、`targetReady=false`，无法进入 ImHamster 或验证真机 Worker/模型/微信行为。以上是本地合成与 watcher 发布证据，不计作设备验收。
 
+### 10.52 Haminn QuickJS 与长 Worker 时间片模拟器验证（2026-10-11）
+
+- 为在等待 CMA-AN00 ADB 调试通道期间补齐宿主层验证，在当前 `Hermit_API_37(AVD)` 上运行了定向 Android instrumentation：`WorkerRuntimeTest`、`QuickJsRuntimeTest`、`ImHamsterDevWorkerSourceTest`，共 15/15 通过。用例验证真实 QuickJS 的模块 loader、结构化事件回合、独立运行态/中断/内存限制、DEV source materialization，以及 80 次原生工具调用跨越多个 32-call 时间片后正确续跑且无丢失/重复。
+- 本次 Gradle 增量构建与仪器测试成功；NDK 配置输出 SDK XML 版本提示但未影响构建或测试。证据仅覆盖 API 37 模拟器宿主，不覆盖 CMA-AN00 的无障碍授权、HAPP 实际 DEV 模块图、后台进程重建、持续通知/定时服务、模型质量或微信行为；不关闭 U0/U1/U4/U6。
+- 最新设备快照仍是 macOS 能识别 CMA-AN00、ADB 仅列出 `emulator-5554`、Haminn DEV `runtime=not-visible`。下一步继续在真实 USB 调试通道建立后部署 Haminn/ImHamster 并验证版本、权限与真实 Worker 运行，随后由 ImHamster 执行合成微信目标并按完整操作轨迹迭代。
+
 ## 11. 交付与完成判定
 
 ImHamster 与 Haminn 独立提交、验证和推送；每次提交前核对各自 Git 根与 origin，保留无关工作区改动。宿主新增合同需同步 SDK/能力文档/实际实现，消费者只接入确实支持的能力。
