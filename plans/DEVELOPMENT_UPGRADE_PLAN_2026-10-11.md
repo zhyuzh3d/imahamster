@@ -483,7 +483,7 @@ JS 测试适合纯状态与组装；QuickJS/Android 仪器测试负责真实模�
 
 - 源码检查发现：通知事件一旦触发 one-shot 子 OST，EDT 的 pause/cancel 仍会高优先级入宿主持久队列，但 UI 只在主状态仍为 idle `event-driven` 时先停止 Worker。若子 OST 正卡在模型或屏幕 effect，用户控制要等整段 AL/OST 结束才生效。
 - 现在只对匹配父 EDT 的活动子 OST，在显式 pause/cancel 前先 stop 当前 Worker，再投递同一持久控制事件并重启。Worker 启动路径先 drain 高优先级控制，再恢复检查点；子 OST 会从未决操作上下文恢复。resume 未来触发时不会打断当前子 OST；无关 EDT 和终态子 OST 也不会被停止。状态匹配规则在 HO 纯函数中测试。
-- HO 纯函数与集成相关路径已通过全量 Node 72/72；ImHamster 0.1.37/code 38 的 DEV 源码在服务端提交为修订 931，读回 `agent/worker.mjs` 与 `app.js` 均含本次改动标记。watcher 状态为 alive，但 `targetReady=false`，服务端 `runtime=not-visible`，页面刷新失败，所以这些只是设备树同步证据，没有运行时行为证据。宿主 APK 更新脚本因零台 ADB 设备退出。U1 的运行中异步 job 与原生 watchdog 仍需进一步完善。
+- HO 纯函数与集成相关路径已通过全量 Node 72/72；ImHamster 0.1.37/code 38 的 DEV 源码与计划已同步到服务端修订 932（tree hash `031d71f9…`），watcher 仍存活。macOS USB 树已识别 CMA-AN00/序列号 AKGR9K1C26013127，但 `adb devices` 为空、无线 ADB 5555 拒绝连接；Haminn 服务的 `runtime=not-visible`，`haminn_open_app` 返回没有前台 Activity，因此目前只有设备树同步证据，没有手机运行行为证据。Haminn 更新脚本因无 ADB transport 停止；本地测试与编译通过。U1 及真机验收仍未完成。
 
 ## 11. 交付与完成判定
 
