@@ -103,7 +103,7 @@ test("a goal-registration CAS conflict preserves the submitted intent and queues
   globalThis.onHaminnEvent({ type: "tool.result", callId: reset.actions[0].callId, ok: true, result: null });
 });
 
-test("a queued goal CAS conflict recognizes a receipt committed by a competing delivery", () => {
+test("a queued goal CAS conflict recognizes committed receipts and retries when none exists", () => {
   const start = globalThis.onHaminnEvent({ type: "start" });
   const idle = globalThis.onHaminnEvent({ type: "tool.result", callId: start.actions[0].callId,
     ok: true, result: null });
@@ -133,6 +133,34 @@ test("a queued goal CAS conflict recognizes a receipt committed by a competing d
 
   const reset = globalThis.onHaminnEvent({ type: "start" });
   globalThis.onHaminnEvent({ type: "tool.result", callId: reset.actions[0].callId, ok: true, result: null });
+
+  const activeCreate = globalThis.onHaminnEvent({ type: "goal.submit", intent: "第二个合成活动 OST" });
+  const activeState = activeCreate.actions[0].params.operations.find(operation =>
+    operation.collection === "agent-runtime" && operation.key === "active-goal").value;
+  const providerRead = globalThis.onHaminnEvent({ type: "tool.result", callId: activeCreate.actions[0].callId,
+    ok: true, result: mockBatchResult(activeCreate.actions[0].params) });
+  assert.equal(providerRead.actions[0].params.key, "provider");
+  const retryEventId = "queued-goal-retry-after-conflict";
+  output = globalThis.onHaminnEvent({ type: "goal.submit", eventId: retryEventId, intent: "冲突后仍需排队的合成 OST" });
+  output = globalThis.onHaminnEvent({ type: "tool.result", callId: output.actions[0].callId, ok: true, result: null });
+  output = globalThis.onHaminnEvent({ type: "tool.result", callId: output.actions[0].callId, ok: false,
+    error: { code: "E_CONFLICT", message: "synthetic queue revision conflict without a receipt" } });
+  assert.equal(output.actions[0].params.key, eventReceiptKey(retryEventId));
+  output = globalThis.onHaminnEvent({ type: "tool.result", callId: output.actions[0].callId, ok: true, result: null });
+  assert.equal(output.actions[0].params.key, "active-goal");
+  output = globalThis.onHaminnEvent({ type: "tool.result", callId: output.actions[0].callId, ok: true,
+    result: { value: activeState, revision: "active-r2" } });
+  assert.equal(output.actions[0].method, "data.batch");
+  const retriedQueue = output.actions[0].params.operations.find(operation => operation.collection === "inbox");
+  assert.equal(retriedQueue.value.eventId, retryEventId);
+  const recordsAfterRetry = new Map();
+  output = globalThis.onHaminnEvent({ type: "tool.result", callId: output.actions[0].callId, ok: true,
+    result: persistMockBatch(recordsAfterRetry, output.actions[0].params) });
+  assert.equal(output.state, "queued");
+  assert.equal(recordsAfterRetry.get(`agent-runtime:${eventReceiptKey(retryEventId)}`).value.queued, true);
+
+  const finalReset = globalThis.onHaminnEvent({ type: "start" });
+  globalThis.onHaminnEvent({ type: "tool.result", callId: finalReset.actions[0].callId, ok: true, result: null });
 });
 
 test("a restored task-done decision resumes HO handoff and loads the next Task revision", () => {
