@@ -485,6 +485,12 @@ JS 测试适合纯状态与组装；QuickJS/Android 仪器测试负责真实模�
 - 现在只对匹配父 EDT 的活动子 OST，在显式 pause/cancel 前先 stop 当前 Worker，再投递同一持久控制事件并重启。Worker 启动路径先 drain 高优先级控制，再恢复检查点；子 OST 会从未决操作上下文恢复。resume 未来触发时不会打断当前子 OST；无关 EDT 和终态子 OST 也不会被停止。状态匹配规则在 HO 纯函数中测试。
 - HO 纯函数与集成相关路径已通过全量 Node 72/72；ImHamster 0.1.37/code 38 的 DEV 源码与计划已同步到服务端修订 932（tree hash `031d71f9…`），watcher 仍存活。macOS USB 树已识别 CMA-AN00/序列号 AKGR9K1C26013127，但 `adb devices` 为空、无线 ADB 5555 拒绝连接；Haminn 服务的 `runtime=not-visible`，`haminn_open_app` 返回没有前台 Activity，因此目前只有设备树同步证据，没有手机运行行为证据。Haminn 更新脚本因无 ADB transport 停止；本地测试与编译通过。U1 及真机验收仍未完成。
 
+### 10.21 仪器测试暴露 EDT 全局授权修订不匹配（2026-10-11）
+
+- 在 API 37 AVD 运行通知路由用例时，Worker 事件队列为空。跟踪到 `AppRegistry.putGrant` 将 app 级授权按全局修订 `0` 保存，而新订阅枚举和投递前复核错误地要求 grant 修订等于实例 `trustRevision`；二处过滤都拒绝了有效的 `workers.run` / `notifications.listen` 授权。这会让所有已授权通知订阅静默失效。
+- Registry 现在用明确的 `GLOBAL_GRANT_REVISION` 常量表达现有存储语义，订阅枚举和投递前复核统一检查该全局授权修订。通知仪器测试现验证精确包订阅、稳定事件 ID、重复投递去重、私有 notification key 不外泄，以及撤销授权后停止新投递。
+- 同一批 API 37 AVD 仪器测试还发现 WorkerHostService 两个队列优先级断言把 JUnit 的消息参数写进了实际值位置；修正断言调用顺序后通过。`WorkerRuntimeTest`、`WorkerHostServiceTest`、`NativeHttpBodyInstrumentedTest`、`NotificationEventRouterTest` 合计 12/12 通过，覆盖 80 次工具调用续跑、控制队列、进程服务恢复、HTTP 读正文时取消和通知路由。该结果是 Android 虚拟设备宿主证据，不替代 CMA-AN00 真机和微信行为验收；手机的 ADB / Haminn 前台通道仍未恢复。
+
 ## 11. 交付与完成判定
 
 ImHamster 与 Haminn 独立提交、验证和推送；每次提交前核对各自 Git 根与 origin，保留无关工作区改动。宿主新增合同需同步 SDK/能力文档/实际实现，消费者只接入确实支持的能力。
