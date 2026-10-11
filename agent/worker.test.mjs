@@ -346,11 +346,13 @@ test("LLM-decomposed Tasks persist, run by dependency order, then return to LLM 
     prompts: actionPrompts.map(prompt => prompt.match(/Goal 子任务计划[^\n]*/)?.[0] || prompt.match(/当前 HO 调度的子任务[^\n]*/)?.[0]) }));
   assert.ok(captures >= 4, "each child and the final coordinator review must observe the synthetic screen");
   const goal = [...records.entries()].find(([key]) => key.startsWith("goals:g:"))[1].value;
+  const savedActive = records.get("agent-runtime:active-goal").value;
   const tasks = [...records.entries()].filter(([key]) => key.startsWith("tasks:t:")).map(([, entry]) => entry.value);
   const coordinator = tasks.find(task => task.kind === "coordination");
   const children = tasks.filter(task => task.kind === "screen-work").sort((a, b) => a.planIndex - b.planIndex);
   assert.equal(goal.state, "done");
   assert.equal(coordinator.state, "done");
+  assert.equal(savedActive.taskGraph.coordinatorRevision, coordinator.revision);
   assert.deepEqual(children.map(task => task.state), ["done", "done"]);
   assert.deepEqual(children[1].dependencies, [children[0].taskId]);
   assert.equal(children.find(task => task.objective.includes("拟定"))?.objectKey, "synthetic:chat:one");

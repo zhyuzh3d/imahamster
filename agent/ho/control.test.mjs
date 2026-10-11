@@ -55,7 +55,7 @@ test("pause and resume keep the current decomposed Task aligned with HO state", 
 
 test("cancel marks unfinished child Tasks and the coordinator cancelled atomically", () => {
   const active = activeRecords("active", { taskGraph: {
-    coordinatorTaskId: "tc", coordinatorRunId: "rc", coordinatorRevision: 3,
+    coordinatorTaskId: "tc", coordinatorRunId: "rc", coordinatorRevision: 10,
     tasks: [
       { taskId: "t1", goalId: "g1", runId: "r1", objective: "第一项", state: "running", dependencies: [], revision: 2 },
       { taskId: "t2", goalId: "g1", runId: "r2", objective: "第二项", state: "ready", dependencies: ["t1"], revision: 1 },
@@ -64,7 +64,7 @@ test("cancel marks unfinished child Tasks and the coordinator cancelled atomical
   } });
   const cancelled = prepareUserControlTransition({ ...active, command: "cancel", now: 3000 });
   assert.deepEqual(cancelled.nextActive.taskGraph.tasks.map(item => item.state), ["cancelled", "cancelled", "done"]);
-  assert.equal(cancelled.nextActive.taskGraph.coordinatorRevision, 4);
+  assert.equal(cancelled.nextActive.taskGraph.coordinatorRevision, 11);
   assert.equal(cancelled.operations.find(item => item.collection === "tasks" && item.key === "t:t2").value.state, "cancelled");
   assert.equal(cancelled.operations.find(item => item.collection === "tasks" && item.key === "t:tc").value.state, "cancelled");
 });

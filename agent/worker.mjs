@@ -1665,13 +1665,15 @@ function advanceTaskGraph() {
     state.taskPlan = { dependencies: graph.tasks.map(task => task.taskId), objectKey: null };
     state.taskRecordKind = "coordination";
     state.taskReviewMode = true;
-    state.taskGraph = { ...graph, coordinatorRevision: Number(graph.coordinatorRevision || 1) + 1 };
     state.progress = "全部拆分 Task 已完成；现在由 LLM 依据原始目标复核整体进展并决定完成或继续。";
     appendTrace("task.scheduler-review", { coordinatorTaskId: graph.coordinatorTaskId, completedCount: graph.tasks.length });
   } else {
     throw new Error("Task graph 没有可调度的 ready Task，且仍存在未完成项");
   }
   state.revision = Number(state.revision || 0) + 1;
+  if (state.taskGraph && state.taskId === state.taskGraph.coordinatorTaskId) {
+    state.taskGraph = { ...state.taskGraph, coordinatorRevision: state.revision };
+  }
   state.lastProgressAt = Date.now();
   state.lastDecision = null;
   state.state = "active";
@@ -1692,6 +1694,9 @@ function advanceTaskGraph() {
 
 function updateGoalAndTask(decision) {
   const now = Date.now();
+  if (state.taskGraph && (state.taskId === state.taskGraph.coordinatorTaskId || state.state === "done")) {
+    state.taskGraph = { ...state.taskGraph, coordinatorRevision: Number(state.revision || 1) };
+  }
   const goalState = state.state === "done" ? "done" : state.state === "failed" ? "active" : "active";
   const taskState = decision?.state === "task-done" || state.state === "done" ? "done"
     : state.state === "failed" ? "failed" : state.state === "waiting" ? "waiting" : "running";
