@@ -91,6 +91,9 @@ h2 { margin: 0; font-size: 17px; }
 .memory-entry-meta { margin: 4px 0 8px; font-size: 10px; line-height: 1.5; overflow-wrap: anywhere; }
 .memory-entry-content { margin: 0; color: #38465d; font-size: 12px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
 .memory-entry-editor { width: 100%; min-height: 92px; padding: 9px; border: 1px solid var(--line); border-radius: 9px; background: white; color: var(--ink); resize: vertical; }
+.memory-entry-fields { display: grid; gap: 7px; }
+.memory-entry-field { display: grid; gap: 4px; color: var(--muted); font-size: 10px; }
+.memory-entry-field .memory-entry-editor { min-height: 48px; }
 .memory-entry-objects { width: 100%; box-sizing: border-box; margin-top: 8px; padding: 9px; border: 1px solid var(--line); border-radius: 9px; background: white; color: var(--ink); font: inherit; font-size: 12px; }
 .memory-entry-actions { display: flex; gap: 7px; margin-top: 9px; }
 .memory-entry-actions .button { min-height: 34px; padding: 0 10px; font-size: 11px; }

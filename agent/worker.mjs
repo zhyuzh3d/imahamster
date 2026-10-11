@@ -1307,7 +1307,7 @@ function saveLearningSuggestion(suggestion) {
       const item = suggestion.experience;
       const fields = [item.title, item.situation, item.approach, item.successEvidence];
       if (fields.every(value => typeof value === "string" && value.trim() && value.length <= 800)) {
-        const value = { schemaVersion: 1, type: "experience", state: "active", title: item.title.trim(), situation: item.situation.trim(), approach: item.approach.trim(), successEvidence: item.successEvidence.trim(), toolRefs: toolRefs(item.toolRefs), sourceGoalId: state.goalId, createdAt: Date.now() };
+        const value = { schemaVersion: 1, type: "experience", state: "active", title: item.title.trim(), situation: item.situation.trim(), approach: item.approach.trim(), successEvidence: item.successEvidence.trim(), toolRefs: toolRefs(item.toolRefs), sourceGoalId: state.goalId, revision: 1, createdAt: Date.now() };
         operations.push(record("knowledge", `experience:${state.goalId}`, value));
       }
     }

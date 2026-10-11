@@ -18,10 +18,12 @@ function experienceValue(item) {
     type: "experience",
     state: "active",
     ...(typeof item?.key === "string" && item.key ? { sourceRef: `knowledge:${item.key}` } : {}),
+    revision: Math.max(1, Number(value.revision) || 1),
     ...(item?.revision !== undefined ? { recordRevision: String(item.revision).slice(0, 80) } : {}),
     ...fields,
     toolRefs,
     ...(Number.isFinite(Number(value.createdAt)) ? { createdAt: Number(value.createdAt) } : {}),
+    ...(Number.isFinite(Number(value.updatedAt)) ? { updatedAt: Number(value.updatedAt) } : {}),
   };
 }
 
@@ -42,7 +44,7 @@ export function retrieveRelevantExperiences(intent, items, { limit = 5 } = {}) {
     return { value, score, index };
   }).filter(Boolean)
     .sort((left, right) => right.score - left.score ||
-      Number(right.value.createdAt || 0) - Number(left.value.createdAt || 0) || left.index - right.index)
+      Number(right.value.updatedAt || right.value.createdAt || 0) - Number(left.value.updatedAt || left.value.createdAt || 0) || left.index - right.index)
     .slice(0, limit)
     .map(item => item.value);
 }

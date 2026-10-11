@@ -37,6 +37,17 @@ test("ME uses recency to break equal relevance and bounds returned records", () 
   assert.equal("sourceGoalId" in both[1], false);
 });
 
+test("ME preserves experience revisions and uses their latest edit time for retrieval order", () => {
+  const items = [
+    exp("微信回复旧经验", "微信朋友消息回复", 10, { revision: 1, updatedAt: 20 }),
+    exp("微信回复已修订经验", "微信朋友消息回复", 1, { revision: 4, updatedAt: 100 }),
+  ];
+  const result = retrieveRelevantExperiences("微信朋友消息回复", items, { limit: 1 });
+  assert.equal(result[0].title, "微信回复已修订经验");
+  assert.equal(result[0].revision, 4);
+  assert.equal(result[0].updatedAt, 100);
+});
+
 test("ME returns no memories when the task has no matching concepts", () => {
   assert.deepEqual(retrieveRelevantExperiences("打开相机", [exp("微信回复", "聊天消息")]), []);
   assert.deepEqual(retrieveRelevantExperiences("?", [exp("微信回复", "聊天消息")]), []);
