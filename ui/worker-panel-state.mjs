@@ -28,15 +28,19 @@ export function deriveWorkerPanelState({ activeRecord, queuedCount = 0, serviceS
   const learningCountValue = Number(active?.learningSaved);
   const learningCount = Number.isSafeInteger(learningCountValue) ? Math.max(0, learningCountValue) : 0;
   const showLearningStatus = !interruptedHandoff || persistedCurrentGoal;
-  const learningStatus = showLearningStatus && active?.state === "done" && active.learningStatus === "pending"
-    ? "成功后经验整理待完成"
-    : showLearningStatus && active?.state === "done" && active.learningStatus === "complete"
-      ? learningCount > 0
-        ? `成功后经验整理完成，保存 ${learningCount} 条`
-        : "成功后经验整理完成，无需新增条目"
-      : showLearningStatus && active?.state === "done" && active.learningStatus === "skipped"
-        ? `成功后经验整理未完成：${String(active.learningError || "查看执行记录").slice(0, 180)}`
-        : null;
+  const learningLead = active?.learningMaintenance ? "后台经验整理" : "成功后经验整理";
+  const learningStatus = showLearningStatus && active?.learningMaintenance &&
+      ["active", "waiting"].includes(active.state) && active.learningStatus === "running"
+    ? "后台经验整理进行中"
+    : showLearningStatus && active?.state === "done" && active.learningStatus === "pending"
+      ? `${learningLead}待完成`
+      : showLearningStatus && active?.state === "done" && active.learningStatus === "complete"
+        ? learningCount > 0
+          ? `${learningLead}完成，保存 ${learningCount} 条`
+          : `${learningLead}完成，无需新增条目`
+        : showLearningStatus && active?.state === "done" && active.learningStatus === "skipped"
+          ? `${learningLead}未完成：${String(active.learningError || "查看执行记录").slice(0, 180)}`
+          : null;
   const visible = (!!active && !TERMINAL_GOAL_STATES.has(active.state)) || queuedCount > 0 ||
     !!active?.trace?.length || liveEventTasks.length > 0 || interruptedHandoff || queueRecoveryNeedsUser || !!learningStatus;
   const activeCanControl = !!active && !["done", "cancelled", "event-driven"].includes(active.state);

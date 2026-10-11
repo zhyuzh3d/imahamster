@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { eventReceiptKey } from "./ho/events.mjs";
 import { notificationInboxKey, timerInboxKey } from "./ho/edts.mjs";
 import { memorySourceRef } from "./me/memory.mjs";
+import { createLearningJob, createLearningMaintenanceAttempt } from "./learning/maintenance.mjs";
 import "./worker.mjs";
 
 let mockStoreRevision = 0;
@@ -333,6 +334,7 @@ test("background goal persists progress and completes across screenshot cycles",
   let modelTurn = 0;
   let captures = 0;
   const modelPrompts = [];
+  const committedBatches = [];
   const provider = { baseUrl: "https://model.example", apiKey: "x".repeat(24), model: "vision-model" };
   records.set("knowledge:experience:reply-context", { revision: "1", value: {
     type: "experience", state: "active", title: "微信消息上下文回复",
@@ -379,6 +381,7 @@ test("background goal persists progress and completes across screenshot cycles",
 
   function tool(method, params) {
     if (method === "data.batch") {
+      committedBatches.push(structuredClone(params.operations));
       for (const item of params.operations) {
         const key = `${item.collection}:${item.key}`;
         if (item.op === "delete") records.delete(key);
@@ -469,9 +472,15 @@ test("background goal persists progress and completes across screenshot cycles",
   assert.equal(captures, 3);
   assert.equal(records.get(`goals:g:${active.goalId}`).value.state, "done");
   assert.equal(records.get(`tasks:t:${active.taskId}`).value.state, "done");
+  assert.ok(committedBatches.some(batch => batch.some(operation => operation.collection === "goals" &&
+    operation.key === `g:${active.goalId}` && operation.value.state === "done") &&
+    batch.some(operation => operation.collection === "inbox" && operation.key.startsWith("l:") &&
+      operation.value.sourceGoalId === active.goalId)),
+  "the completed user Goal and its durable learning event must commit atomically");
   const secondGoal = [...records.entries()].find(([key, record]) => key.startsWith("goals:g:") && record.value.intent.includes("订阅号"))[1].value;
   assert.equal(secondGoal.state, "done");
-  assert.equal([...records.entries()].filter(([key]) => key.startsWith("tasks:t:") && records.get(key).value.state === "done").length, 2);
+  assert.equal([...records.entries()].filter(([key]) => key.startsWith("tasks:t:") &&
+    records.get(key).value.kind === "screen-work" && records.get(key).value.state === "done").length, 2);
   const journal = [...records.entries()].filter(([key]) => key.startsWith(`agent-events:e:${active.goalId}:`)).map(([, item]) => item.value);
   assert.equal(journal.length, active.journalSequence,
     "every recorded Worker trace event must be written as an independent record");
@@ -480,27 +489,33 @@ test("background goal persists progress and completes across screenshot cycles",
   const taskPlan = journal.find(event => event.phase === "task.classification-requested");
   assert.equal(taskPlan?.contextManifest?.purpose, "task-plan");
   assert.deepEqual(taskPlan?.contextManifest?.selected.sourceRefs, [`task:${active.taskId}:intent`]);
-  const learning = journal.find(event => event.phase === "learning.model-requested");
+  const learning = [...records.entries()].filter(([key]) => key.startsWith("agent-events:e:"))
+    .map(([, item]) => item.value).find(event => event.phase === "learning.model-requested");
   assert.equal(learning?.contextManifest?.purpose, "learning");
   assert.ok(learning?.contextManifest?.selected.learningTraceRefs.length > 0);
 });
 
-test("a Worker restart resumes unfinished post-success learning without reopening the OST", () => {
+test("a Worker restart resumes learning as a separate maintenance OST without a screen action", () => {
   const records = new Map();
   const goalId = "goal-learning-restart";
   const active = {
     goalId, taskId: "task-learning-restart", runId: "run-learning-restart",
     intent: "在合成界面确认结果", taskType: "one-shot", taskKind: "OST", state: "done",
     step: 3, revision: 4, progress: "LLM 已根据最终画面判断完成", learningStatus: "pending",
-    trace: [], journalSequence: 0,
+    trace: [{ at: 50, step: 3, phase: "decision", decision: "done", evidence: "LLM 已根据最终画面判断完成" }], journalSequence: 0,
   };
   records.set("agent-runtime:active-goal", { value: active, revision: "active-r1" });
+  records.set(`goals:g:${goalId}`, { value: { goalId, intent: active.intent, state: "done", learningStatus: "pending" }, revision: "goal-r1" });
+  const job = createLearningJob({ sourceGoalId: goalId, sourceTaskId: active.taskId,
+    intent: active.intent, progress: active.progress, history: [{ sourceRef: "goal:goal-learning-restart:result",
+      at: 50, step: 3, phase: "decision", decision: "done", evidence: active.progress }], now: 100 });
+  records.set(`inbox:${job.key}`, { value: job.value, revision: "job-r1" });
   const provider = { baseUrl: "https://model.example", apiKey: "x".repeat(24), model: "vision-model" };
-  let nextRevision = 1;
   let output = globalThis.onHaminnEvent({ type: "start" });
 
-  for (let turn = 0; output?.actions?.length && turn < 20; turn += 1) {
+  for (let turn = 0; output?.actions?.length && turn < 40; turn += 1) {
     const call = output.actions[0];
+    let result;
     if (call.method === "network.request") {
       const body = JSON.parse(call.params.bodyText);
       const prompt = body.messages.map(message => typeof message.content === "string"
@@ -509,40 +524,209 @@ test("a Worker restart resumes unfinished post-success learning without reopenin
       assert.match(prompt, /在合成界面确认结果/);
       assert.match(prompt, /LLM 已根据最终画面判断完成/);
       assert.equal(call.params.timeoutMs <= 55_000, true);
-      output = null;
-      break;
-    }
-    let result;
-    if (call.method === "data.get") {
+      result = modelCall(call.params, () => ({}), { learning: { saveExperience: false, saveMemory: false, savePattern: false,
+        saveRecipe: false, saveTool: false } });
+    } else if (call.method === "data.get") {
       result = call.params.key === "provider" ? { value: provider }
         : records.get(`${call.params.collection}:${call.params.key}`) || null;
+    } else if (call.method === "data.scan") {
+      result = { items: [...records.entries()].filter(([key]) => key.startsWith(`${call.params.collection}:${call.params.prefix}`))
+        .sort(([left], [right]) => left.localeCompare(right)).slice(0, call.params.limit)
+        .map(([key, item]) => ({ key: key.slice(call.params.collection.length + 1), ...item })) };
     } else if (call.method === "data.put") {
-      const revision = `learning-r${nextRevision++}`;
-      records.set(`${call.params.collection}:${call.params.key}`, {
-        value: structuredClone(call.params.value), revision,
-      });
-      result = { revision };
+      records.set(`${call.params.collection}:${call.params.key}`, { value: structuredClone(call.params.value), revision: "active-r2" });
+      result = { revision: "active-r2" };
     } else if (call.method === "data.batch") {
       result = persistMockBatch(records, call.params);
+    } else if (call.method === "interaction.capture") {
+      assert.fail("Learning maintenance must not capture or operate the target screen");
     } else {
       assert.fail(`Unexpected recovery effect: ${call.method}`);
     }
     output = globalThis.onHaminnEvent({ type: "tool.result", callId: call.callId, ok: true, result });
   }
 
-  assert.equal(output, null, "startup should reach the learning request without a screen action");
-  assert.equal(records.get("agent-runtime:active-goal").value.state, "done",
-    "resuming learning must not reopen or reclassify the completed OST");
-  assert.equal(records.get("agent-runtime:active-goal").value.learningStatus, "pending");
+  assert.equal(output.actions, undefined, "maintenance OST should settle and return to idle");
+  const completed = records.get("agent-runtime:active-goal").value;
+  assert.equal(completed.state, "done");
+  assert.notEqual(completed.goalId, goalId, "learning uses an independent OST identity");
+  assert.equal(completed.taskRecordKind, "learning-maintenance");
+  assert.equal(completed.learningStatus, "complete");
+  assert.equal(records.get(`goals:g:${goalId}`).value.state, "done",
+    "the source user OST remains completed while maintenance runs");
+  assert.equal(records.has(`inbox:${job.key}`), false, "the durable learning event is removed only after settlement");
+  const maintenanceGoal = records.get(`goals:g:${completed.goalId}`).value;
+  assert.equal(maintenanceGoal.sourceGoalId, goalId);
+  assert.equal(maintenanceGoal.purpose, "learning-maintenance");
+});
 
-  const completed = records.get("agent-runtime:active-goal");
-  completed.value.learningStatus = "complete";
-  output = globalThis.onHaminnEvent({ type: "start" });
+test("learning provider failures retry the same maintenance OST without changing the source OST", () => {
+  const records = new Map();
+  const goalId = "goal-learning-retry";
+  const taskId = "task-learning-retry";
+  const active = { goalId, taskId, runId: "run-learning-retry", intent: "整理合成任务经验",
+    taskType: "one-shot", taskKind: "OST", state: "done", step: 2, revision: 3,
+    progress: "LLM 已判断合成目标完成", learningStatus: "pending", trace: [], journalSequence: 0 };
+  const job = createLearningJob({ sourceGoalId: goalId, sourceTaskId: taskId,
+    intent: active.intent, progress: active.progress, history: [], now: 100 });
+  records.set("agent-runtime:active-goal", { value: active, revision: "active-r1" });
+  records.set(`goals:g:${goalId}`, { value: { goalId, intent: active.intent, state: "done" }, revision: "goal-r1" });
+  records.set(`inbox:${job.key}`, { value: job.value, revision: "job-r1" });
+  const provider = { baseUrl: "https://model.example", apiKey: "x".repeat(24), model: "vision-model" };
+  let networkCalls = 0;
+  let captures = 0;
+
+  function tool(method, params) {
+    if (method === "data.get") return params.key === "provider" ? { value: provider }
+      : records.get(`${params.collection}:${params.key}`) || null;
+    if (method === "data.scan") return { items: [...records.entries()].filter(([key]) =>
+      key.startsWith(`${params.collection}:${params.prefix}`)).sort(([left], [right]) => left.localeCompare(right))
+      .slice(0, params.limit).map(([key, item]) => ({ key: key.slice(params.collection.length + 1), ...item })) };
+    if (method === "data.put") {
+      records.set(`${params.collection}:${params.key}`, { value: structuredClone(params.value), revision: "active-r2" });
+      return { revision: "active-r2" };
+    }
+    if (method === "data.batch") return persistMockBatch(records, params);
+    if (method === "network.request") {
+      networkCalls += 1;
+      return networkCalls === 1
+        ? { status: 503, bodyText: "temporary provider outage" }
+        : modelCall(params, () => ({}), { learning: { saveExperience: false, saveMemory: false,
+          savePattern: false, saveRecipe: false, saveTool: false } });
+    }
+    if (method === "interaction.capture") { captures += 1; return {}; }
+    if (method === "worker.wait") return { waitedMs: params.ms };
+    throw new Error(`Unexpected tool: ${method}`);
+  }
+
+  function deliver(event) {
+    let output = globalThis.onHaminnEvent(event);
+    for (let turn = 0; output?.actions?.length && turn < 60; turn += 1) {
+      const call = output.actions[0];
+      output = globalThis.onHaminnEvent({ type: "tool.result", callId: call.callId, ok: true,
+        result: tool(call.method, call.params) });
+    }
+    return output;
+  }
+
+  const firstAttempt = deliver({ type: "start" });
+  assert.equal(firstAttempt.state, "waiting");
+  assert.equal(firstAttempt.userRequired, undefined);
+  assert.equal(records.get("agent-runtime:active-goal").value.learningMaintenance.sourceGoalId, goalId);
+  assert.equal(records.get(`goals:g:${goalId}`).value.state, "done");
+  assert.ok(records.has(`inbox:${job.key}`), "the learning event remains durable through retryable model failure");
+  assert.equal(captures, 0);
+
+  const resumed = deliver({ type: "tick" });
+  const settled = records.get("agent-runtime:active-goal").value;
+  assert.equal(resumed.state, "done");
+  assert.equal(networkCalls, 2);
+  assert.equal(captures, 0, "maintenance recovery must not reobserve or operate the target app");
+  assert.equal(settled.goalId, records.get(`goals:g:${settled.goalId}`).value.goalId);
+  assert.equal(settled.learningStatus, "complete");
+  assert.equal(settled.recoveryAttempts, 1);
+  assert.equal(records.get(`goals:g:${goalId}`).value.state, "done");
+  assert.equal(records.has(`inbox:${job.key}`), false);
+});
+
+test("a learning maintenance CAS conflict resumes from its durable job without capturing the target screen", () => {
+  const records = new Map();
+  const goalId = "goal-learning-maintenance-cas";
+  const taskId = "task-learning-maintenance-cas";
+  const active = { goalId, taskId, runId: "run-learning-maintenance-cas", intent: "整理合成任务经验",
+    taskType: "one-shot", taskKind: "OST", state: "done", step: 2, revision: 3,
+    progress: "LLM 已判断合成目标完成", learningStatus: "pending", trace: [], journalSequence: 0 };
+  const job = createLearningJob({ sourceGoalId: goalId, sourceTaskId: taskId,
+    intent: active.intent, progress: active.progress, history: [], now: 100 });
+  records.set("agent-runtime:active-goal", { value: active, revision: "active-r1" });
+  records.set(`goals:g:${goalId}`, { value: { goalId, intent: active.intent, state: "done" }, revision: "goal-r1" });
+  records.set(`tasks:t:${taskId}`, { value: { taskId, goalId, state: "done" }, revision: "task-r1" });
+  records.set(`inbox:${job.key}`, { value: job.value, revision: "job-r1" });
+  const provider = { baseUrl: "https://model.example", apiKey: "x".repeat(24), model: "vision-model" };
+  let raced = false;
+  let captures = 0;
+
+  function tool(method, params) {
+    if (method === "data.get") return params.key === "provider" ? { value: provider }
+      : records.get(`${params.collection}:${params.key}`) || null;
+    if (method === "data.scan") return { items: [...records.entries()].filter(([key]) =>
+      key.startsWith(`${params.collection}:${params.prefix}`)).sort(([left], [right]) => left.localeCompare(right))
+      .slice(0, params.limit).map(([key, item]) => ({ key: key.slice(params.collection.length + 1), ...item })) };
+    if (method === "data.put") {
+      records.set(`${params.collection}:${params.key}`, { value: structuredClone(params.value), revision: "active-r3" });
+      return { revision: "active-r3" };
+    }
+    if (method === "data.batch") {
+      return persistMockBatch(records, params);
+    }
+    if (method === "network.request") return modelCall(params, () => ({}), { learning: {
+      saveExperience: false, saveMemory: false, savePattern: false, saveRecipe: false, saveTool: false,
+    } });
+    if (method === "interaction.capture") { captures += 1; return {}; }
+    if (method === "worker.wait") return { waitedMs: params.ms };
+    throw new Error(`Unexpected tool: ${method}`);
+  }
+
+  let output = globalThis.onHaminnEvent({ type: "start" });
+  for (let turn = 0; output?.actions?.length && turn < 60; turn += 1) {
+    const call = output.actions[0];
+    if (call.method === "data.batch" && call.params.operations.some(operation =>
+      operation.collection === "inbox" && operation.key === job.key && operation.value?.state === "running") && !raced) {
+      raced = true;
+      const attempt = createLearningMaintenanceAttempt(job.value, {
+        jobKey: job.key, jobRevision: "job-r1", now: 500,
+      });
+      records.set("agent-runtime:active-goal", { value: attempt.state, revision: "active-r2" });
+      records.set(`goals:g:${attempt.state.goalId}`, { value: attempt.goal, revision: "goal-r2" });
+      records.set(`tasks:t:${attempt.state.taskId}`, { value: attempt.task, revision: "task-r2" });
+      records.set(`inbox:${job.key}`, { value: attempt.nextJob, revision: "job-r2" });
+      output = globalThis.onHaminnEvent({ type: "tool.result", callId: call.callId, ok: false,
+        error: { code: "E_CONFLICT", retryable: true, message: "concurrent learning maintenance start" } });
+      continue;
+    }
+    output = globalThis.onHaminnEvent({ type: "tool.result", callId: call.callId, ok: true,
+      result: tool(call.method, call.params) });
+  }
+
+  assert.equal(raced, true, "a competing maintenance worker wins the initial CAS");
+  assert.equal(captures, 0, "CAS recovery for learning must remain data-only");
+  const settled = records.get("agent-runtime:active-goal").value;
+  assert.equal(settled.taskRecordKind, "learning-maintenance");
+  assert.equal(settled.state, "done");
+  assert.equal(records.get(`goals:g:${goalId}`).value.state, "done");
+  assert.equal(records.has(`inbox:${job.key}`), false);
+});
+
+test("legacy completed Goals recover their missing learning outbox before queue draining", () => {
+  const goalId = "goal-legacy-learning-outbox";
+  const active = { goalId, taskId: "task-legacy-learning-outbox", runId: "run-legacy-learning-outbox",
+    intent: "整理旧版合成任务经验", taskType: "one-shot", taskKind: "OST", state: "done",
+    step: 4, revision: 5, progress: "LLM 已判断旧版合成目标完成", learningStatus: "pending",
+    trace: [], journalSequence: 0 };
+  const records = new Map([[
+    "agent-runtime:active-goal", { value: active, revision: "active-r1" },
+  ]]);
+
+  let output = globalThis.onHaminnEvent({ type: "start" });
   output = globalThis.onHaminnEvent({ type: "tool.result", callId: output.actions[0].callId,
-    ok: true, result: completed });
-  assert.equal(output.state, "done");
-  assert.equal(output.startup, true);
-  assert.equal(output.actions, undefined, "completed learning must not be repeated after restart");
+    ok: true, result: records.get("agent-runtime:active-goal") });
+  assert.equal(output.actions[0].method, "data.get");
+  assert.equal(output.actions[0].params.collection, "inbox");
+
+  output = globalThis.onHaminnEvent({ type: "tool.result", callId: output.actions[0].callId,
+    ok: true, result: null });
+  assert.equal(output.actions[0].method, "data.batch");
+  const batch = output.actions[0].params;
+  const outbox = batch.operations.find(operation => operation.collection === "inbox" && operation.key.startsWith("l:"));
+  assert.equal(outbox.value.sourceGoalId, goalId);
+  assert.equal(outbox.value.sourceTaskId, active.taskId);
+  const saved = persistMockBatch(records, batch);
+  output = globalThis.onHaminnEvent({ type: "tool.result", callId: output.actions[0].callId, ok: true, result: saved });
+  assert.equal(output.actions[0].method, "data.scan");
+  assert.equal(records.get("agent-runtime:active-goal").value.state, "done");
+  assert.equal(records.get("agent-runtime:active-goal").value.goalId, goalId,
+    "outbox recovery preserves the completed user Goal identity");
+  assert.ok(records.has(`inbox:${outbox.key}`));
 });
 
 test("active Goal and Task plans hydrate on Worker restart and survive later progress writes", () => {
@@ -575,7 +759,9 @@ test("active Goal and Task plans hydrate on Worker restart and survive later pro
     if (method === "data.get") return params.key === "provider"
       ? { value: { baseUrl: "https://model.example", apiKey: "x".repeat(24), model: "vision-model" } }
       : records.get(`${params.collection}:${params.key}`) || null;
-    if (method === "data.scan") return { items: [] };
+    if (method === "data.scan") return { items: [...records.entries()].filter(([key]) =>
+      key.startsWith(`${params.collection}:${params.prefix}`)).sort(([left], [right]) => left.localeCompare(right))
+      .slice(0, params.limit).map(([key, item]) => ({ key: key.slice(params.collection.length + 1), ...item })) };
     if (method === "data.put") {
       records.set(`${params.collection}:${params.key}`, { value: params.value, revision: "4" });
       return { revision: "4" };
@@ -739,7 +925,8 @@ test("LLM-decomposed Tasks persist, run by dependency order, then return to LLM 
   const children = tasks.filter(task => task.kind === "screen-work").sort((a, b) => a.planIndex - b.planIndex);
   assert.equal(goal.state, "done");
   assert.equal(coordinator.state, "done");
-  assert.equal(savedActive.taskGraph.coordinatorRevision, coordinator.revision);
+  assert.equal(savedActive.taskRecordKind, "learning-maintenance");
+  assert.equal(savedActive.learningMaintenance.sourceGoalId, goal.goalId);
   assert.deepEqual(children.map(task => task.state), ["done", "done"]);
   assert.deepEqual(children[1].dependencies, [children[0].taskId]);
   assert.equal(children.find(task => task.objective.includes("拟定"))?.objectKey, "synthetic:chat:one");
@@ -867,8 +1054,9 @@ test("LLM requests Persona and object Memory only when relevant and HO restores 
   assert.match(actionPrompts[2], /Worker 恢复时重新载入用户 Identity Core 第 2 版/);
   assert.match(actionPrompts[2], /contact:张三/);
   assert.match(actionPrompts[3], /本次 OST 已达到/);
-  const saved = records.get("agent-runtime:active-goal").value;
-  const actionRequests = saved.trace.filter(event => event.phase === "model.requested" && event.purpose === "action");
+  const sourceTrace = [...records.entries()].filter(([key]) => key.startsWith(`agent-events:e:${goalId}:`))
+    .map(([, item]) => item.value);
+  const actionRequests = sourceTrace.filter(event => event.phase === "model.requested" && event.purpose === "action");
   const manifest = actionRequests[2]?.contextManifest;
   assert.equal(manifest?.purpose, "action");
   assert.deepEqual(manifest?.selected.identityCore, { source: "user", version: 2 });
@@ -877,11 +1065,11 @@ test("LLM requests Persona and object Memory only when relevant and HO restores 
   assert.deepEqual(manifest?.selected.behaviorPatterns, [{ ref: "self-model:bp:reply", recordRevision: "5" }]);
   assert.deepEqual(manifest?.selected.toolCandidates, [{ ref: "knowledge:tool-candidate:reply-flow", recordRevision: "4" }]);
   assert.deepEqual(manifest?.selected.toolRecipes, [{ ref: "knowledge:tool-recipe:reply-flow", recordRevision: "6" }]);
-  assert.equal(saved.trace.some(event => event.phase === "context.requested" && event.includeIdentityCore), true);
-  assert.equal(saved.trace.some(event => event.phase === "memory.context-loaded" && event.memoryCount === 1), true);
-  assert.equal(saved.trace.some(event => event.phase === "identity-core.context-loaded" && event.version === 2), true);
-  assert.equal(saved.trace.some(event => event.phase === "identity-core.context-restored" && event.version === 2), true);
-  assert.equal(saved.trace.some(event => event.phase === "context.query-limited"), true);
+  assert.equal(sourceTrace.some(event => event.phase === "context.requested" && event.includeIdentityCore), true);
+  assert.equal(sourceTrace.some(event => event.phase === "memory.context-loaded" && event.memoryCount === 1), true);
+  assert.equal(sourceTrace.some(event => event.phase === "identity-core.context-loaded" && event.version === 2), true);
+  assert.equal(sourceTrace.some(event => event.phase === "identity-core.context-restored" && event.version === 2), true);
+  assert.equal(sourceTrace.some(event => event.phase === "context.query-limited"), true);
 });
 
 test("an EDT notification is deduplicated, matched by the LLM, and creates one separate OST after durable acknowledgement", () => {
@@ -986,7 +1174,9 @@ test("an EDT notification is deduplicated, matched by the LLM, and creates one s
   assert.equal(hostDeadlines[0], undefined, "EDT classification is not bounded as a one-shot task");
   assert.equal(hostDeadlines[1], undefined, "matching an event does not start the OST clock");
   assert.ok(Number.isFinite(hostDeadlines[2]), "the triggered OST carries its own host deadline");
-  assert.equal(records.get("agent-runtime:active-goal").value.sourceEventId, eventId);
+  const completedGoal = records.get(`goals:g:${active.goalId}`).value;
+  assert.equal(completedGoal.sourceEventId, eventId);
+  assert.equal(completedGoal.state, "done");
   assert.equal(records.get(`event-tasks:ed:${eventTask.eventTaskId}`).value.state, "active");
 });
 
@@ -1121,7 +1311,8 @@ test("a recurring timer EDT persists each trigger as a separate OST and remains 
   assert.equal(deliver({ type: "event.acknowledged", eventId: eventId2 }).state, "done");
   assert.ok(captures >= 1);
   assert.ok(Number.isFinite(hostDeadlines.find(Number.isFinite)), "the triggered OST receives its own deadline");
-  assert.equal(records.get("agent-runtime:active-goal").value.sourceEventId, eventId2);
+  assert.equal(records.get(`goals:g:${secondOst.goalId}`).value.sourceEventId, eventId2);
+  assert.equal(records.get(`goals:g:${secondOst.goalId}`).value.state, "done");
   assert.equal(records.get(`event-tasks:ed:${eventTask.eventTaskId}`).value.state, "active",
     "completing one timer-triggered OST leaves the recurring EDT enabled");
 });
@@ -2884,10 +3075,16 @@ test("LLM can start a new action loop after timeout and choose a reusable experi
 
   function tool(method, params) {
     if (method === "data.get") return params.key === "provider" ? { value: provider } : records.get(`${params.collection}:${params.key}`);
-    if (method === "data.scan") return { items: [] };
+    if (method === "data.scan") return { items: [...records.entries()].filter(([key]) =>
+      key.startsWith(`${params.collection}:${params.prefix}`)).sort(([left], [right]) => left.localeCompare(right))
+      .slice(0, params.limit).map(([key, item]) => ({ key: key.slice(params.collection.length + 1), ...item })) };
     if (method === "data.put") { records.set(`${params.collection}:${params.key}`, { value: params.value, revision: "5" }); return { revision: "5" }; }
     if (method === "data.batch") {
-      for (const item of params.operations) records.set(`${item.collection}:${item.key}`, { value: item.value, revision: "5" });
+      for (const item of params.operations) {
+        const key = `${item.collection}:${item.key}`;
+        if (item.op === "delete") records.delete(key);
+        else records.set(key, { value: item.value, revision: "5" });
+      }
       return mockBatchResult(params);
     }
     if (method === "interaction.capture") return { mime: "image/jpeg", dataBase64: "synthetic-frame" };
@@ -2921,8 +3118,11 @@ test("LLM can start a new action loop after timeout and choose a reusable experi
   }
   const saved = records.get("agent-runtime:active-goal").value;
   assert.equal(output.state, "done");
-  assert.equal(saved.actionLoop.index, 3);
-  assert.equal(saved.trace.find(event => event.phase === "action-loop.review")?.choice, "new-action-loop");
+  assert.equal(saved.taskRecordKind, "learning-maintenance");
+  assert.equal(records.get(`goals:g:${active.goalId}`).value.state, "done");
+  const sourceJournal = [...records.entries()].filter(([key]) => key.startsWith(`agent-events:e:${active.goalId}:`))
+    .map(([, item]) => item.value);
+  assert.equal(sourceJournal.find(event => event.phase === "action-loop.review")?.choice, "new-action-loop");
   assert.equal(records.get(`knowledge:experience:${active.goalId}`).value.type, "experience");
   assert.deepEqual(records.get(`self-model:bp:${active.goalId}`).value, {
     schemaVersion: 1, type: "behavior-pattern", state: "active", scope: "global",
@@ -3089,7 +3289,9 @@ test("all Worker model purposes can consume a response stored as a Haminn file",
       if (params.collection === "screen-interaction" && params.key === "provider") return { value: provider };
       return records.get(`${params.collection}:${params.key}`) || null;
     }
-    if (method === "data.scan") return { items: [] };
+    if (method === "data.scan") return { items: [...records.entries()].filter(([key]) =>
+      key.startsWith(`${params.collection}:${params.prefix}`)).sort(([left], [right]) => left.localeCompare(right))
+      .slice(0, params.limit).map(([key, item]) => ({ key: key.slice(params.collection.length + 1), ...item })) };
     if (method === "interaction.capture") return { mime: "image/jpeg", width: 1, height: 1, dataBase64: "c3ludGhldGljLWZyYW1l" };
     if (method === "network.request") return completeModelResponse(params);
     if (method === "files.readText") return { text: responseFiles.get(params.logicalFileId) };
@@ -3125,9 +3327,12 @@ test("all Worker model purposes can consume a response stored as a Haminn file",
     assert.ok(purposes.includes("action"));
     assert.ok(purposes.includes("learning"));
     const saved = records.get("agent-runtime:active-goal")?.value;
-    assert.equal(saved.actionLoop.index, 2);
-    assert.equal(saved.actionLoopHistory[0].index, 1);
-    assert.equal(saved.actionLoopHistory[0].endReason, "timeout-new-loop");
+    assert.equal(saved.taskRecordKind, "learning-maintenance");
+    const sourceGoalId = saved.learningMaintenance.sourceGoalId;
+    const sourceJournal = [...records.entries()].filter(([key]) => key.startsWith(`agent-events:e:${sourceGoalId}:`))
+      .map(([, item]) => item.value);
+    assert.equal(records.get(`goals:g:${sourceGoalId}`).value.state, "done");
+    assert.equal(sourceJournal.find(event => event.phase === "action-loop.review")?.choice, "new-action-loop");
     assert.equal(responseFiles.size, 0, "every stored provider response file should be deleted after reading");
   } finally {
     Date.now = originalNow;

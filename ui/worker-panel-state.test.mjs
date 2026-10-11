@@ -88,6 +88,21 @@ test("completed OST summarizes successful learning without changing its task sta
   assert.equal(state.learningStatus, "成功后经验整理完成，保存 3 条");
 });
 
+test("separate learning maintenance OST reports its own progress and completion", () => {
+  const running = deriveWorkerPanelState({
+    activeRecord: { value: { state: "active", learningStatus: "running", learningMaintenance: { sourceGoalId: "g-source" } } },
+    serviceState: "running",
+  });
+  assert.equal(running.learningStatus, "后台经验整理进行中");
+
+  const completed = deriveWorkerPanelState({
+    activeRecord: { value: { state: "done", learningStatus: "complete", learningSaved: 2,
+      learningMaintenance: { sourceGoalId: "g-source" } } },
+    serviceState: "running",
+  });
+  assert.equal(completed.learningStatus, "后台经验整理完成，保存 2 条");
+});
+
 test("decomposed OST progress identifies the current HO Task and completed units", () => {
   const state = deriveWorkerPanelState({
     activeRecord: { value: { state: "active", taskId: "t2", taskGraph: { tasks: [

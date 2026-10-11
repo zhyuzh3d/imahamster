@@ -12,6 +12,13 @@ import { toolRefForAction } from "./te/catalog.mjs";
 import { retrieveRelevantToolCandidates } from "./te/retrieval.mjs";
 import { retrieveRelevantToolRecipes } from "./te/recipe-retrieval.mjs";
 import { prepareLearningRecords } from "./learning/records.mjs";
+import {
+  createLearningJob,
+  createLearningMaintenanceAttempt,
+  isLearningJob,
+  learningJobKey,
+  LEARNING_JOB_PREFIX,
+} from "./learning/maintenance.mjs";
 import { makeJournalEntry } from "./observability/journal.mjs";
 import { prepareJournaledStoreWrite } from "./storage/journaled-write.mjs";
 import {
@@ -96,10 +103,10 @@ const CRITICAL_STATE_READ_STAGES = new Set([
   "event-task-control-receipt-read", "event-task-control-task-read",
   "goal-control-receipt-read", "goal-control-active-read", "goal-control-goal-read", "goal-control-task-read",
   "goal-control-queue-read",
-  "event-receipt-revision-read",
+  "event-receipt-revision-read", "learning-maintenance-job-read",
 ]);
 const POST_TASK_QUEUE_READ_STAGES = new Set([
-  "queue-read", "completed-queue-read", "notification-read", "timer-read",
+  "queue-read", "completed-queue-read", "notification-read", "timer-read", "learning-read",
 ]);
 const POST_TASK_QUEUE_RECOVERY_STAGES = new Set([
   ...POST_TASK_QUEUE_READ_STAGES, "post-task-queue-recovery-wait-result",
@@ -190,7 +197,10 @@ function applyProviderText(purpose, text) {
     case "al-plan": return saveActionLoopPlan(text);
     case "event-match": return saveEventMatchDecision(parseJsonObject(text, "EDT 通知匹配"));
     case "al-review": return applyActionLoopReview(text);
-    case "learning": return saveLearningSuggestion(parseJsonObject(text, "经验整理"));
+    case "learning": {
+      if (state.learningMaintenance && goalDeadlineExpired()) return failExpiredGoal();
+      return saveLearningSuggestion(parseJsonObject(text, "经验整理"));
+    }
     default: throw new Error(`未知模型调用用途：${String(purpose)}`);
   }
 }
@@ -459,6 +469,14 @@ function continueAfterStorageConflict() {
     pending = "storage-conflict-state-saved";
     return action("data.put", { collection: COLLECTION, key: ACTIVE_KEY, value: state });
   }
+  if (state.learningMaintenance) {
+    state.activeSegmentStartedAt = null;
+    startActiveSegment();
+    appendTrace("learning.maintenance-storage-conflict-resumed", {
+      sourceGoalId: state.learningMaintenance.sourceGoalId,
+    });
+    return readLearningMaintenanceJob();
+  }
   if (["event-match", "unclassified"].includes(state.taskType) || !state.goalId || !state.taskId) {
     return beginObserve();
   }
@@ -558,8 +576,32 @@ function goalDeadlineExpired() {
   return isGoalDeadlineExpired(state, { maxDurationMs: MAX_GOAL_DURATION_MS });
 }
 
+function settleLearningMaintenanceFailure(reason) {
+  const message = String(reason?.message || reason || "经验整理未能完成").slice(0, 360);
+  finishActiveSegment();
+  state.state = "done";
+  state.waiting = null;
+  state.learningStatus = "skipped";
+  state.learningError = message;
+  state.progress = `原 OST 已完成；后台经验整理未完成：${message}`;
+  state.providerPurpose = null;
+  state.revision = Number(state.revision || 0) + 1;
+  appendTrace("learning.review-skipped", { reason: message, maintenanceGoalId: state.goalId });
+  const operations = updateGoalAndTask(null);
+  const maintenance = state.learningMaintenance;
+  if (maintenance?.jobKey && maintenance?.jobRevision) {
+    operations.push({ op: "delete", collection: "inbox", key: maintenance.jobKey,
+      expectedRevision: maintenance.jobRevision });
+  }
+  pending = "learning-failed-saved";
+  return action("data.batch", { operations });
+}
+
 function failExpiredGoal() {
   if (!state || terminal(state.state)) return { state: state?.state || "idle" };
+  if (state.learningMaintenance) {
+    return settleLearningMaintenanceFailure("后台经验整理 OST 超过 30 分钟上限；来源用户 OST 仍保持已完成。");
+  }
   finishActiveSegment();
   const reason = "单次操作目标运行超过 30 分钟上限，编排器已停止本次目标。可检查记录后重新开始。";
   if (state.pendingOperation && !["verified", "not-executed", "failed"].includes(state.pendingOperation.status)) {
@@ -761,6 +803,58 @@ function readNextNotificationEvent() {
 function readNextTimerEvent() {
   pending = "timer-read";
   return action("data.scan", { collection: "inbox", prefix: "t:", limit: 1 });
+}
+
+function readNextLearningJob() {
+  pending = "learning-read";
+  return action("data.scan", { collection: "inbox", prefix: LEARNING_JOB_PREFIX, limit: 100 });
+}
+
+function beginLearningMaintenance(jobRecord) {
+  const attempt = createLearningMaintenanceAttempt(jobRecord.value, {
+    jobKey: jobRecord.key, jobRevision: jobRecord.revision,
+    now: Date.now(), goalDeadlineMs: MAX_GOAL_DURATION_MS,
+  });
+  state = attempt.state;
+  const operations = [
+    record("goals", `g:${state.goalId}`, attempt.goal, "absent"),
+    record("tasks", `t:${state.taskId}`, attempt.task, "absent"),
+    record(COLLECTION, ACTIVE_KEY, state),
+    record("inbox", jobRecord.key, attempt.nextJob, jobRecord.revision),
+  ];
+  pending = "learning-maintenance-started";
+  return action("data.batch", { operations });
+}
+
+function readLearningMaintenanceJob() {
+  pending = "learning-maintenance-job-read";
+  return action("data.get", { collection: "inbox", key: state.learningMaintenance.jobKey });
+}
+
+function loadLearningMaintenanceProvider() {
+  if (providerValid(provider)) return requestLearningReview();
+  state.providerPurpose = "learning";
+  pending = "learning-maintenance-provider";
+  return action("data.get", { collection: "screen-interaction", key: "provider" });
+}
+
+function recoverLegacyLearningJob(existing = null) {
+  if (!state?.goalId || !state?.taskId || !state.intent || !state.progress) {
+    state.learningStatus = "skipped";
+    state.learningError = "已完成 OST 缺少可恢复的学习来源记录";
+    pending = "learning-failed-saved";
+    return action("data.put", { collection: COLLECTION, key: ACTIVE_KEY, value: state });
+  }
+  const job = createLearningJob({ sourceGoalId: state.goalId, sourceTaskId: state.taskId,
+    intent: state.intent, progress: state.progress, history: learningHistory(), now: Date.now() });
+  state.learningStatus = "pending";
+  state.learningJobKey = job.key;
+  appendTrace("learning.outbox-recovered", { jobKey: job.key });
+  pending = "learning-outbox-recovered";
+  return action("data.batch", { operations: [
+    record("inbox", job.key, job.value, existing?.revision || "absent"),
+    record(COLLECTION, ACTIVE_KEY, state),
+  ] });
 }
 
 function beginEventTaskControl(event) {
@@ -1345,6 +1439,7 @@ function prepareGoalResume(reply = "") {
   }
   state.recoveryAttempts = 0;
   startActiveSegment();
+  if (state.learningMaintenance) return readLearningMaintenanceJob();
   pending = "resume-provider";
   return action("data.get", { collection: "screen-interaction", key: "provider" });
 }
@@ -1352,6 +1447,13 @@ function prepareGoalResume(reply = "") {
 function continueAfterActiveLoad() {
   if (state.state === "paused") return { state: "paused", progress: state.progress || "任务已暂停" };
   if (state.waiting?.userRequired) return { state: "waiting", progress: state.progress, userRequired: true };
+  if (state.learningMaintenance) {
+    state.state = "active";
+    state.waiting = null;
+    state.activeSegmentStartedAt = null;
+    startActiveSegment();
+    return readLearningMaintenanceJob();
+  }
   if (state.taskGraph && state.lastDecision?.state === "task-done") return advanceTaskGraph();
   state.state = "active";
   state.activeSegmentStartedAt = null;
@@ -1764,16 +1866,17 @@ function applyActionLoopReview(text) {
 }
 
 function requestLearningReview() {
-  const history = learningHistory();
+  const learning = learningSourceContext();
+  const history = learning.history;
   const messages = [
     { role: "system", content: "你负责从已成功完成的手机任务中提炼可复用经验、行为偏好、对象记忆或工具流程。只依据提供的目标、结果和操作轨迹，不补造轨迹未支持的事实；没有值得复用的内容就不保存。Memory 只保存简短且对相关后续任务有用的事实或事件摘要；可按可见对象使用稳定 objectRef（如 contact:显示名称），清楚区分 observed 与 inferred，并只引用给出的 sourceRef。不得复制整段聊天；不得保存密码、密钥、认证信息或与任务无关的敏感细节。行为模式只能描述助手自身有证据的通用偏好，不能形成新的任务授权或越权指令。工具配方只允许 2–8 个有序步骤，每步引用已注册工具并附简短用途；不得生成代码、坐标或可执行脚本，具体参数以后由执行中的 LLM 根据新截图决定。严格返回 JSON。" },
-    { role: "user", content: `任务目标：${state.intent}\n成功结果：${state.progress}\n执行轨迹摘要（sourceRef 是唯一允许引用的记忆来源）：${JSON.stringify(history)}\n判断是否值得保存经验、通用行为模式、对象 Memory、结构化工具配方或历史候选。配方只能总结轨迹中已有的安全步骤，后续由 LLM 根据当前截图逐步判断和调用已注册工具；不要保存不通用的步骤。Memory 最多 3 条，每条 kind 为 fact/episode、inference 为 observed/inferred，必须指定 objectRefs、content、tags 和至少一个 sourceRefs。配方必须给 sourceRefs，且只能引用轨迹里确实出现的 sourceRef。JSON 格式：{"saveExperience":false,"experience":{"title":"","situation":"","approach":"","successEvidence":"","toolRefs":[]},"savePattern":false,"pattern":{"title":"","condition":"","guidance":"","evidence":""},"saveMemory":false,"memories":[{"kind":"fact","objectRefs":[],"content":"","inference":"observed","tags":[],"sourceRefs":[]}],"saveRecipe":false,"recipe":{"name":"","purpose":"","applicability":"","sourceRefs":[],"steps":[{"toolRef":"interaction.capture","purpose":"观察当前界面"},{"toolRef":"interaction.tap","purpose":"按当前截图选择目标"}]},"saveTool":false,"tool":{"name":"","description":"","toolRefs":[]}}` },
+    { role: "user", content: `任务目标：${learning.intent}\n成功结果：${learning.progress}\n执行轨迹摘要（sourceRef 是唯一允许引用的记忆来源）：${JSON.stringify(history)}\n判断是否值得保存经验、通用行为模式、对象 Memory、结构化工具配方或历史候选。配方只能总结轨迹中已有的安全步骤，后续由 LLM 根据当前截图逐步判断和调用已注册工具；不要保存不通用的步骤。Memory 最多 3 条，每条 kind 为 fact/episode、inference 为 observed/inferred，必须指定 objectRefs、content、tags 和至少一个 sourceRefs。配方必须给 sourceRefs，且只能引用轨迹里确实出现的 sourceRef。JSON 格式：{"saveExperience":false,"experience":{"title":"","situation":"","approach":"","successEvidence":"","toolRefs":[]},"savePattern":false,"pattern":{"title":"","condition":"","guidance":"","evidence":""},"saveMemory":false,"memories":[{"kind":"fact","objectRefs":[],"content":"","inference":"observed","tags":[],"sourceRefs":[]}],"saveRecipe":false,"recipe":{"name":"","purpose":"","applicability":"","sourceRefs":[],"steps":[{"toolRef":"interaction.capture","purpose":"观察当前界面"},{"toolRef":"interaction.tap","purpose":"按当前截图选择目标"}]},"saveTool":false,"tool":{"name":"","description":"","toolRefs":[]}}` },
   ];
   pendingContextManifest = buildContextManifest(state, {
     purpose: "learning",
     context: messages[1].content,
     selection: {
-      sourceRefs: [`goal:${String(state.goalId || "").slice(0, 128)}:result`],
+      sourceRefs: [`goal:${String(learning.goalId || "").slice(0, 128)}:result`],
       learningTraceRefs: history.map(item => item.sourceRef).filter(Boolean),
     },
   });
@@ -1781,6 +1884,8 @@ function requestLearningReview() {
 }
 
 function learningHistory() {
+  if (state?.learningMaintenance) return Array.isArray(state.learningMaintenance.sourceHistory)
+    ? state.learningMaintenance.sourceHistory : [];
   return (state.trace || [])
     .filter(event => ["action-loop.started", "action-loop.review", "decision", "bridge.result", "recovery.scheduled"].includes(event.phase))
     .slice(-24)
@@ -1800,20 +1905,47 @@ function learningHistory() {
     }));
 }
 
+function learningSourceContext() {
+  const maintenance = state?.learningMaintenance;
+  return {
+    goalId: maintenance?.sourceGoalId || state?.goalId,
+    intent: maintenance?.sourceIntent || state?.intent || "",
+    progress: maintenance?.sourceProgress || state?.progress || "",
+    history: learningHistory(),
+  };
+}
+
 function saveLearningSuggestion(suggestion) {
   try {
+    const learning = learningSourceContext();
     const prepared = prepareLearningRecords(suggestion, {
-      goalId: state.goalId, progress: state.progress, history: learningHistory(), now: Date.now(),
+      goalId: learning.goalId, progress: learning.progress, history: learning.history, now: Date.now(),
     });
     const operations = prepared.records.map(item => record(item.collection, item.key, item.value));
     for (const reason of prepared.skipped) appendTrace("learning.item-skipped", { reason });
     state.learningStatus = "complete";
     state.learningSaved = operations.length;
     appendTrace("learning.review-complete", { saved: operations.length });
+    if (state.learningMaintenance) {
+      finishActiveSegment();
+      state.state = "done";
+      state.waiting = null;
+      state.progress = operations.length
+        ? `经验整理完成，保存 ${operations.length} 条可复用记录。`
+        : "经验整理完成；本次没有需要保存的可复用记录。";
+      state.revision = Number(state.revision || 0) + 1;
+      operations.push(...updateGoalAndTask(null));
+      const maintenance = state.learningMaintenance;
+      operations.push({ op: "delete", collection: "inbox", key: maintenance.jobKey,
+        expectedRevision: maintenance.jobRevision });
+      pending = "learning-saved";
+      return action("data.batch", { operations });
+    }
     operations.push(record(COLLECTION, ACTIVE_KEY, state));
     pending = "learning-saved";
     return action("data.batch", { operations });
   } catch (error) {
+    if (state.learningMaintenance) return settleLearningMaintenanceFailure(error);
     state.learningStatus = "skipped";
     state.learningError = String(error?.message || error).slice(0, 200);
     appendTrace("learning.review-skipped", { reason: state.learningError });
@@ -2016,6 +2148,15 @@ function updateGoalAndTask(decision) {
 function persistDecision(decision) {
   storeDecision(decision);
   const operations = updateGoalAndTask(decision);
+  if (state.state === "done" && state.learningStatus === "pending" && !state.learningMaintenance) {
+    const job = createLearningJob({ sourceGoalId: state.goalId, sourceTaskId: state.taskId,
+      intent: state.intent, progress: state.progress, history: learningHistory(), now: Date.now() });
+    state.learningJobKey = job.key;
+    const activeIndex = operations.findIndex(item => item.collection === COLLECTION && item.key === ACTIVE_KEY);
+    if (activeIndex >= 0) operations[activeIndex] = record(COLLECTION, ACTIVE_KEY, state);
+    operations.push(record("inbox", job.key, job.value, "absent"));
+    appendTrace("learning.outbox-created", { jobKey: job.key });
+  }
   if (state.pendingOperationId) {
     const operation = applyCurrentOperationOutcome(state, decision.operationResult, decision.evidence, Date.now());
     state.lastOperationResult = decision.operationResult;
@@ -2170,6 +2311,10 @@ function launchAction(a) {
 
 function beginObserve() {
   if (!state || state.state === "done" || state.state === "failed" || state.state === "event-driven") return { state: state?.state || "idle" };
+  if (state.learningMaintenance) {
+    if (goalDeadlineExpired()) return failExpiredGoal();
+    return loadLearningMaintenanceProvider();
+  }
   if (state.taskType === "event-match" && state.pendingEventMatch) {
     const match = state.pendingEventMatch;
     return requestEventMatch(match.event, match.eventTask, { key: match.inboxKey, revision: match.inboxRevision });
@@ -2452,7 +2597,7 @@ function advanceAfterTool(event) {
     }
     case "timer-read": {
       const item = result?.items?.[0];
-      if (!item) return { state: state?.state || "idle", progress: state?.progress || "" };
+      if (!item) return readNextLearningJob();
       pendingTimerRecord = item;
       pending = "timer-event-task-read";
       return action("data.get", { collection: EVENT_TASKS_COLLECTION, key: `ed:${item.value.timerId}` });
@@ -2482,6 +2627,20 @@ function advanceAfterTool(event) {
       return createTimerTriggeredOst(event, eventTask, item);
     }
     case "timer-event-settled": return readNextQueuedGoal();
+    case "learning-read": {
+      const items = Array.isArray(result?.items) ? result.items : [];
+      const jobRecord = items.find(item => isLearningJob(item?.value) &&
+        item.key === learningJobKey(item.value.sourceGoalId));
+      if (jobRecord) return beginLearningMaintenance(jobRecord);
+      const malformed = items.find(item => item?.key?.startsWith(LEARNING_JOB_PREFIX));
+      if (malformed) {
+        pending = "learning-invalid-settled";
+        return action("data.batch", { operations: [{ op: "delete", collection: "inbox",
+          key: malformed.key, expectedRevision: malformed.revision }] });
+      }
+      return { state: state?.state || "idle", progress: state?.progress || "" };
+    }
+    case "learning-invalid-settled": return readNextLearningJob();
     case "timer-trigger-created": return {
       state: "event-start-pending", eventId: state.pendingEventStartFor,
       goalId: state.goalId, progress: state.progress,
@@ -2684,9 +2843,9 @@ function advanceAfterTool(event) {
       if (state && !state.actionLoop && state.loop) state.actionLoop = state.loop;
       if (state) delete state.loop;
       if (state?.state === "done" && state.learningStatus === "pending") {
-        startupNeedsQueueDrain = false;
-        appendTrace("learning.resume-after-worker-restart", {});
-        return persist("learning-resume-started-saved");
+        if (!state.goalId || !state.taskId) return recoverLegacyLearningJob();
+        pending = "legacy-learning-job-read";
+        return action("data.get", { collection: "inbox", key: learningJobKey(state.goalId) });
       }
       if (state?.postTaskQueueRecovery?.userRequired) {
         const previousAttempts = Number(state.postTaskQueueRecovery.attempts || 0);
@@ -2723,6 +2882,18 @@ function advanceAfterTool(event) {
       state.taskRecordKind = typeof result?.value?.kind === "string" ? result.value.kind : "screen-work";
       return continueAfterActiveLoad();
     }
+    case "legacy-learning-job-read": {
+      startupNeedsQueueDrain = true;
+      if (isLearningJob(result?.value) && result.value.sourceGoalId === state.goalId &&
+          result.value.sourceTaskId === state.taskId) {
+        state.learningJobKey = learningJobKey(state.goalId);
+        appendTrace("learning.outbox-found-after-restart", { jobKey: state.learningJobKey });
+        return persist("legacy-learning-job-found-saved");
+      }
+      return recoverLegacyLearningJob(result || null);
+    }
+    case "legacy-learning-job-found-saved": return readNextQueuedGoal();
+    case "learning-outbox-recovered": return readNextQueuedGoal();
     case "load-provider": {
       if (!providerValid(result?.value)) throw new Error("后台任务无法读取有效模型配置");
       provider = result.value;
@@ -2766,6 +2937,37 @@ function advanceAfterTool(event) {
       const receiptRecovery = recoverPreparedGlobalAction();
       if (receiptRecovery) return receiptRecovery;
       return beginObserve();
+    }
+    case "learning-maintenance-started": return readLearningMaintenanceJob();
+    case "learning-maintenance-job-read": {
+      const maintenance = state.learningMaintenance;
+      const job = result?.value;
+      if (typeof result?.revision !== "string" || !result.revision) {
+        throw workerPersistenceFailure(new Error("经验整理事件缺少可用于恢复的 Host revision"), pending);
+      }
+      if (!isLearningJob(job) || job.state !== "running" || job.maintenanceGoalId !== state.goalId ||
+          job.sourceGoalId !== maintenance.sourceGoalId) {
+        maintenance.jobRevision = result.revision;
+        return settleLearningMaintenanceFailure("经验整理事件与当前维护 OST 不匹配，已停止该维护尝试。");
+      }
+      maintenance.jobRevision = result.revision;
+      state.providerPurpose = null;
+      appendTrace("learning.maintenance-event-resumed", { jobKey: maintenance.jobKey,
+        attempt: maintenance.attempt, revision: result.revision });
+      return persist("learning-maintenance-revision-saved");
+    }
+    case "learning-maintenance-revision-saved": return loadLearningMaintenanceProvider();
+    case "learning-maintenance-provider": {
+      if (!providerValid(result?.value)) {
+        provider = null;
+        const error = new Error("后台经验整理无法读取有效模型配置");
+        error.retryable = false;
+        error.category = "model-configuration";
+        throw error;
+      }
+      provider = result.value;
+      appendTrace("model.ready", { model: provider.model, purpose: "learning", maintenance: true });
+      return requestLearningReview();
     }
     case "context-request-saved": {
       if (state.pendingContextRequest?.objectRefs?.length) {
@@ -2818,12 +3020,6 @@ function advanceAfterTool(event) {
     case "decision-saved": {
       if (state.lastDecision?.state === "task-done" && state.taskGraph) return advanceTaskGraph();
       if (terminal(state.state)) {
-        if (state.state === "done" && state.learningStatus !== "complete" && state.learningStatus !== "skipped") {
-          state.learningStatus = "pending";
-          pending = "learning-request-saved";
-          appendTrace("learning.review-requested", {});
-          return action("data.put", { collection: COLLECTION, key: ACTIVE_KEY, value: state });
-        }
         pending = "completed-queue-read";
         return action("data.scan", { collection: "inbox", prefix: "q:", limit: 1 });
       }
@@ -3113,7 +3309,8 @@ globalThis.onHaminnEvent = event => {
       const errorCode = String(error?.code || "").slice(0, 48);
       appendTrace(pending.includes("model") || pending.includes("provider")
         ? "model.error" : "worker.error", { stage: pending, ...(errorCode ? { code: errorCode } : {}), message: reason });
-      const providerFailure = ["get-provider", "resume-provider", "provider-result", "provider-file-read", "provider-file-cleanup"].includes(pending);
+      const providerFailure = ["get-provider", "resume-provider", "provider-result", "provider-file-read", "provider-file-cleanup",
+        "learning-maintenance-provider"].includes(pending);
       const modelFailure = providerFailure;
       const screenFailure = pending === "capture-result" || pending === "action-result";
       if (screenFailure || (modelFailure && state.providerPurpose !== "learning")) {
@@ -3181,7 +3378,7 @@ globalThis.onHaminnEvent = event => {
           failedAtStep: state.step,
         };
       }
-      if (providerFailure && state.providerPurpose === "learning") {
+      if (providerFailure && state.providerPurpose === "learning" && !state.learningMaintenance) {
         state.learningStatus = "skipped";
         state.learningError = reason;
         state.providerPurpose = null;
@@ -3203,6 +3400,11 @@ globalThis.onHaminnEvent = event => {
         state.lastModelError = reason;
         state.lastModelErrorCode = errorCode || null;
         const retryable = error?.retryable !== false;
+        if (state.learningMaintenance && (!retryable || state.recoveryAttempts >= MAX_RECOVERY_ATTEMPTS)) {
+          return settleLearningMaintenanceFailure(`${retryable
+            ? `连续 ${state.recoveryAttempts} 次自动恢复仍未解决`
+            : "后台经验整理遇到不可自动恢复的异常"}：${reason}`);
+        }
         if (!retryable) return pauseForUser(`${reason}。检查模型/API配置后可重试。`, error?.category || "model-configuration");
         if (state.recoveryAttempts >= MAX_RECOVERY_ATTEMPTS) {
           return pauseForUser(`连续 ${state.recoveryAttempts} 次自动恢复仍未解决：${reason}。进度已保存，可检查网络/设备后重试。`, "recovery-exhausted");

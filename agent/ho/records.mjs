@@ -22,12 +22,15 @@ export function goalProgressRecord(state, goalState, now) {
     schemaVersion: 1, goalId: state.goalId, intent: state.intent,
     ...(state.goalPlan || goalPlanFromRecord(null)),
     ...(state.taskKind ? { taskKind: state.taskKind } : {}),
+    ...(state.learningMaintenance ? { purpose: "learning-maintenance",
+      sourceGoalId: state.learningMaintenance.sourceGoalId } : {}),
     ...(state.parentEventTaskId ? { parentEventTaskId: state.parentEventTaskId } : {}),
     ...(state.sourceEventId ? { sourceEventId: state.sourceEventId } : {}),
     state: goalState, revision: state.revision, progress: state.progress,
     createdAt: state.createdAt, updatedAt: now,
     completedAt: state.state === "done" ? now : undefined,
-    evidenceRefs: state.state === "done" ? [`screen-step:${state.step}`] : undefined,
+    evidenceRefs: state.state === "done" ? state.learningMaintenance
+      ? [`goal:${state.learningMaintenance.sourceGoalId}:result`] : [`screen-step:${state.step}`] : undefined,
   };
 }
 
@@ -38,7 +41,9 @@ export function taskProgressRecord(state, taskState, now) {
     ...(state.taskPlan || taskPlanFromRecord(null)),
     ...(state.parentEventTaskId ? { parentEventTaskId: state.parentEventTaskId } : {}),
     ...(state.sourceEventId ? { sourceEventId: state.sourceEventId } : {}),
-    progress: state.progress, waiting: state.waiting, resultRefs: [`screen-step:${state.step}`],
+    progress: state.progress, waiting: state.waiting,
+    resultRefs: state.learningMaintenance ? [`goal:${state.learningMaintenance.sourceGoalId}:result`]
+      : [`screen-step:${state.step}`],
     createdAt: state.createdAt, updatedAt: now,
   };
 }
