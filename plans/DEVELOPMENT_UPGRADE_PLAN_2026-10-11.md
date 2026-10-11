@@ -499,7 +499,7 @@ JS 测试适合纯状态与组装；QuickJS/Android 仪器测试负责真实模�
 - 真机验收前的通用容错复查发现：不精确 Alarm 已把 timer 事件持久入队、但 Android 暂时拒绝后台启动 WorkerHostService 时，一次性计时器已消费且没有后续唤醒。Haminn 现在把“启用 Worker 的持久队列仍未被活动 Worker 接管”纳入共享 alarm 重建，5 分钟后重新唤醒；设备启动和 Haminn 更新后会从持久启用列表恢复 Worker，明确停止/撤销授权的 Worker 不会自动重启。一次性重试由 DB 中队列事实驱动，不复制事件或创建额外 OST。该补强已通过 AVD 定时仪器测试；具体锁屏、进程回收和重启后的真实 OEM 行为仍待 CMA-AN00 验证。
 - 为之后定位设备端丢触发，宿主现在记录 alarm 到达、due/queued Worker 数、每个队列唤醒结果，以及 FGS 提升/启动或重启失败的异常类型与堆栈；不记录 timer 的用户任务内容。新增日志后的 `:app:compileDebugKotlin` 与 `:app:compileDebugAndroidTestKotlin` 通过。HaminnApp 仍有本轮范围内未提交代码。
 - 并发回归现覆盖“上一条计时 OST 自动等待时又收到下一条 timer”：第二条事件保持在持久 Inbox，未覆盖当前 OST；第一条完成后才创建带新 goalId 的 OST。定向用例与全量 ImHamster Node 76/76 通过，语法与 `git diff --check` 通过。DEV 设备服务仍无前台 Activity，ADB 只见 AVD，真机验收待 USB 调试通道恢复。
-- ImHamster DEV watcher 仍存活并持续同步源码（版本 `0.1.37 / code 38`），runtime 为 `not-visible`。认证服务后执行 `haminn_enter_dev_mode` 仍返回 `not-visible`，随后 `haminn_open_app` 明确失败为“Haminn has no foreground activity”。macOS USB 树识别 CMA-AN00，但 ADB 重启后仍只枚举 AVD，`192.168.124.29:5555` 也拒绝连接，因此无法更新手机 Haminn APK、启动 DEV happ 或做真机 timer/微信验收。已请用户解锁手机、确认 USB 调试和接受本机 RSA 授权；HaminnApp 工作树保留未提交代码，待真机验证后再决定宿主提交与推送。
+- ImHamster DEV watcher 仍存活并持续同步源码（版本 `0.1.37 / code 38`），runtime 为 `not-visible`。认证服务后执行 `haminn_enter_dev_mode` 仍返回 `not-visible`，随后 `haminn_open_app` 明确失败为“Haminn has no foreground activity”；尝试 `haminn_open_agent_session` 后再次进入 DEV 也没有恢复前台。macOS USB 树识别 CMA-AN00，但 ADB 重启后仍只枚举 AVD，`192.168.124.29:5555` 也拒绝连接，因此无法更新手机 Haminn APK、启动 DEV happ 或做真机 timer/微信验收。已请用户解锁手机、确认 USB 调试和接受本机 RSA 授权；HaminnApp 工作树保留未提交代码，待真机验证后再决定宿主提交与推送。
 
 ## 11. 交付与完成判定
 
