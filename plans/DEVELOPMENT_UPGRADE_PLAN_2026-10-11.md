@@ -596,8 +596,8 @@ JS 测试适合纯状态与组装；QuickJS/Android 仪器测试负责真实模�
 ### 10.37 Task 图进度对用户可见（2026-10-11）
 
 - HO 已能把复杂 OST 拆分并逐项调度，但执行面板此前只显示原始目标、AL 与自由文本进度，用户看不到当前子 Task、完成数或正在进行的整体目标复核。
-- ui/worker-panel-state.mjs 现在从活动 OST 的持久 Task 图派生有界进度摘要，app.js 将其并入现有状态行；简单 OST 不增加多余内容。完成数直接来自 Task 状态，当前项来自 HO 调度 ID，最终复核明确显示为“整体目标复核”，UI 不介入完成判断或状态写入。
-- 全量 node --test 129/129 通过，node --check app.js、面板模块语法检查和 git diff --check 通过。Haminn DEV revision 1227 先于本次 UI 改动；设备仍仅有模拟器可见，因此新摘要尚未在手机渲染验收。
+- ui/worker-panel-state.mjs 现在从活动 OST 的持久 Task 图派生有界进度摘要，app.js 将其并入现有状态行；简单 OST 不增加多余内容。完成数直接来自 Task 状态，当前项来自 HO 调度 ID，最终复核明确显示为“整体目标复核”；若 task-done 已保存但 scheduler handoff 尚未完成，则显示等待调度，不误报当前子 Task 仍在执行。UI 不介入完成判断或状态写入。
+- 全量 node --test 130/130 通过，node --check app.js、面板模块语法检查和 git diff --check 通过。Haminn DEV revision 1227 先于本次 UI 改动；设备仍仅有模拟器可见，因此新摘要尚未在手机渲染验收。
 
 ## 11. 交付与完成判定
 

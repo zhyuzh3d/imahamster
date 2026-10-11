@@ -91,3 +91,18 @@ test("whole-goal review is shown separately from the completed child Tasks", () 
     completed: 2, total: 2, currentLabel: "整体目标复核",
   });
 });
+
+test("a durable task-done decision shows a scheduler handoff instead of a running child", () => {
+  const state = deriveWorkerPanelState({
+    activeRecord: { value: { state: "active", taskId: "t1", lastDecision: { state: "task-done" },
+      taskGraph: { tasks: [
+        { taskId: "t1", objective: "读取最新消息", state: "done", planIndex: 0 },
+        { taskId: "t2", objective: "拟定回复", state: "ready", planIndex: 1 },
+      ] } } },
+    serviceState: "running",
+  });
+
+  assert.deepEqual(state.taskGraphProgress, {
+    completed: 1, total: 2, currentLabel: "当前项已完成，等待 HO 调度下一项",
+  });
+});

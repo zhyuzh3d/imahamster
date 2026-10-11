@@ -6,8 +6,10 @@ function taskGraphProgress(active) {
   const currentIndex = tasks.findIndex(task => task?.taskId === active.taskId);
   const current = currentIndex >= 0 ? tasks[currentIndex] : null;
   const reviewingGoal = active.taskReviewMode === true && active.taskId === active.taskGraph.coordinatorTaskId;
+  const handoffPending = active.lastDecision?.state === "task-done" && current?.state === "done";
   const currentLabel = reviewingGoal ? "整体目标复核"
-    : current ? `第 ${Number.isInteger(current.planIndex) ? current.planIndex + 1 : currentIndex + 1}/${tasks.length} 项：${String(current.objective || "").slice(0, 120)}`
+    : handoffPending ? "当前项已完成，等待 HO 调度下一项"
+      : current ? `第 ${Number.isInteger(current.planIndex) ? current.planIndex + 1 : currentIndex + 1}/${tasks.length} 项：${String(current.objective || "").slice(0, 120)}`
       : "等待 HO 恢复调度";
   return { completed: tasks.filter(task => task?.state === "done").length, total: tasks.length, currentLabel };
 }
