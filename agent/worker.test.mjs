@@ -103,6 +103,38 @@ test("a goal-registration CAS conflict preserves the submitted intent and queues
   globalThis.onHaminnEvent({ type: "tool.result", callId: reset.actions[0].callId, ok: true, result: null });
 });
 
+test("a queued goal CAS conflict recognizes a receipt committed by a competing delivery", () => {
+  const start = globalThis.onHaminnEvent({ type: "start" });
+  const idle = globalThis.onHaminnEvent({ type: "tool.result", callId: start.actions[0].callId,
+    ok: true, result: null });
+  assert.equal(idle.state, "idle");
+  const current = globalThis.onHaminnEvent({ type: "goal.submit", intent: "当前合成 OST" });
+  const provider = globalThis.onHaminnEvent({ type: "tool.result", callId: current.actions[0].callId,
+    ok: true, result: mockBatchResult(current.actions[0].params) });
+  assert.equal(provider.actions[0].params.key, "provider");
+
+  const eventId = "queued-goal-competing-submit";
+  let output = globalThis.onHaminnEvent({ type: "goal.submit", eventId, intent: "只应排队一次的合成 OST" });
+  output = globalThis.onHaminnEvent({ type: "tool.result", callId: output.actions[0].callId, ok: true, result: null });
+  assert.equal(output.actions[0].method, "data.batch");
+  assert.equal(output.actions[0].params.operations.find(operation => operation.collection === "inbox").value.eventId, eventId);
+
+  const committedReceipt = { eventId, type: "goal.submit", state: "queued", queued: true };
+  const key = `event:${eventReceiptKey(eventId).slice("event:".length)}`;
+  const records = new Map([[`agent-runtime:${key}`, { value: committedReceipt, revision: "receipt-r1" }]]);
+  const conflict = globalThis.onHaminnEvent({ type: "tool.result", callId: output.actions[0].callId,
+    ok: false, error: { code: "E_CONFLICT", message: "receipt was committed concurrently" } });
+  assert.equal(conflict.actions[0].method, "data.get");
+  assert.equal(conflict.actions[0].params.key, eventReceiptKey(eventId));
+  const duplicate = globalThis.onHaminnEvent({ type: "tool.result", callId: conflict.actions[0].callId, ok: true,
+    result: records.get(`agent-runtime:${eventReceiptKey(eventId)}`) });
+  assert.equal(duplicate.duplicate, true);
+  assert.equal(duplicate.receipt.queued, true);
+
+  const reset = globalThis.onHaminnEvent({ type: "start" });
+  globalThis.onHaminnEvent({ type: "tool.result", callId: reset.actions[0].callId, ok: true, result: null });
+});
+
 test("a restored task-done decision resumes HO handoff and loads the next Task revision", () => {
   const now = Date.now();
   const first = { taskId: "task-cas-first", runId: "run-first", objective: "读取最新消息", kind: "screen-work",

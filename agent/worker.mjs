@@ -288,7 +288,7 @@ function beginStorageConflictRecovery(error, method, failedStage) {
     pending = "goal-control-conflict-receipt-read";
     return action("data.get", { collection: COLLECTION, key: eventReceiptKey(pendingGoalControl.eventId) });
   }
-  if (stage === "create-goal" && pendingGoalRegistration) {
+  if (["create-goal", "queue-saved"].includes(stage) && pendingGoalRegistration) {
     storageConflictContext.kind = "goal-registration";
     storageConflictContext.intent = pendingGoalRegistration.intent;
     storageConflictContext.eventId = pendingGoalRegistration.eventId;
@@ -2325,8 +2325,8 @@ function advanceAfterTool(event) {
       pendingGoalSubmit = null;
       if (!incoming) throw new Error("目标事件收据检查缺少原始事件");
       if (result?.value) return { state: state?.state || "idle", duplicate: true, eventId: incoming.eventId };
-      if (state && !terminal(state.state)) return enqueueGoal(incoming.intent, incoming.eventId);
       pendingGoalRegistration = { intent: incoming.intent, eventId: incoming.eventId };
+      if (state && !terminal(state.state)) return enqueueGoal(incoming.intent, incoming.eventId);
       const operations = makeGoalAndTask(incoming.intent, incoming.eventId);
       state.runId = operations[1].value.runId;
       appendTrace("goal.accepted", { intentLength: incoming.intent.trim().length, eventId: incoming.eventId });
@@ -2970,7 +2970,7 @@ globalThis.onHaminnEvent = event => {
       settleJournalWrite(event);
       if (!event.ok && event.error?.code === "E_CONFLICT" &&
           (hasLifecycleWrite(activeCallMethod, activeCallParams) || EVENT_INBOX_REPLAY_STAGES.has(pending) ||
-            GOAL_CONTROL_CONFLICT_STAGES.has(pending))) {
+            GOAL_CONTROL_CONFLICT_STAGES.has(pending) || (pending === "queue-saved" && pendingGoalRegistration))) {
         const failedMethod = activeCallMethod;
         const failedStage = pending;
         activeCallId = null;
