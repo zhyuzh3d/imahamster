@@ -49,6 +49,12 @@ export function goalDeadlineExpired(state, options = {}) {
   return deadline !== null && (options.now ?? Date.now()) >= deadline;
 }
 
+export function boundTimeoutToDeadline(deadlineAt, defaultTimeoutMs, now = Date.now()) {
+  const fallback = Math.max(1, Math.floor(Number(defaultTimeoutMs) || 1));
+  if (!Number.isFinite(deadlineAt)) return fallback;
+  return Math.max(1, Math.min(fallback, Math.floor(deadlineAt - now)));
+}
+
 export function beginActionLoop(state, reason, now = Date.now()) {
   const previous = state.actionLoop;
   const index = Math.max(Number(state.actionLoopIndex) || 0, Number(previous?.index) || 0) + 1;

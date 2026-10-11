@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  boundTimeoutToDeadline,
   actionLoopElapsedMs,
   actionLoopExpired,
   beginActionLoop,
@@ -9,6 +10,12 @@ import {
   goalDeadlineExpired,
   startActiveSegment,
 } from "./lifecycle.mjs";
+
+test("model request timeout is clipped to the remaining OST deadline", () => {
+  assert.equal(boundTimeoutToDeadline(10_000, 55_000, 7_500), 2_500);
+  assert.equal(boundTimeoutToDeadline(100, 55_000, 200), 1);
+  assert.equal(boundTimeoutToDeadline(Number.NaN, 55_000, 200), 55_000);
+});
 
 test("active time is accumulated once and AL budget remains separate from OST deadline", () => {
   const state = {

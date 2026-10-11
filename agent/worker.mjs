@@ -1,6 +1,6 @@
 // Haminn background Worker entry. Each Bridge effect is returned to the host
 // separately so authorization and revocation are checked between effects.
-import { buildChatCompletionRequest, classifyProviderStatus, parseChatCompletionContent, readProviderResponse } from "./llm/provider.mjs";
+import { buildChatCompletionRequest, classifyProviderStatus, DEFAULT_PROVIDER_TIMEOUT_MS, parseChatCompletionContent, readProviderResponse } from "./llm/provider.mjs";
 import { buildActionContext } from "./cae/context.mjs";
 import { SYSTEM_PROMPT } from "./cae/prompts.mjs";
 import { retrieveRelevantExperiences } from "./me/retrieval.mjs";
@@ -25,6 +25,7 @@ import {
   transitionEventTask,
 } from "./ho/edts.mjs";
 import {
+  boundTimeoutToDeadline,
   actionLoopElapsedMs as elapsedActionLoopMs,
   actionLoopExpired as isActionLoopExpired,
   beginActionLoop,
@@ -70,14 +71,45 @@ let controlNeedsQueueDrain = false;
 
 function requestProvider(purpose, phase, fields, messages, { userAgent = false } = {}) {
   state.providerPurpose = purpose;
-  const params = buildChatCompletionRequest(provider, messages, { userAgent });
+  let timeoutMs = DEFAULT_PROVIDER_TIMEOUT_MS;
+  if (state && !["event-match", "event-driven"].includes(state.taskType) && !terminal(state.state)) {
+    ensureGoalDeadline();
+    if (goalDeadlineExpired()) {
+      state.providerPurpose = null;
+      return failExpiredGoal();
+    }
+    timeoutMs = boundTimeoutToDeadline(state.goalDeadlineAt, timeoutMs);
+  }
+  const params = buildChatCompletionRequest(provider, messages, { timeoutMs, userAgent });
   return tracedCall(phase, { ...fields, purpose, model: provider.model }, "network.request", params, "provider-result");
 }
 
 function applyProviderText(purpose, text) {
   state.providerPurpose = null;
   switch (purpose) {
-    case "action": return persistDecision(parseDecision(text));
+    case "action": {
+      let decision;
+      try {
+        decision = parseDecision(text);
+      } catch (error) {
+        if (!actionLoopExpired()) throw error;
+        appendTrace("action-loop.action-decision-deferred", {
+          decision: "invalid", responseLength: String(text || "").length,
+          message: String(error?.message || error).slice(0, 180),
+        });
+        return beginActionLoopReviewCapture();
+      }
+      if (actionLoopExpired() && decision.state === "action") {
+        appendTrace("action-loop.action-decision-deferred", {
+          decision: decision.state,
+          evidence: String(decision.evidence || "").slice(0, 240),
+          ...(decision.action ? actionTrace(decision.action) : {}),
+          ...(decision.operationResult ? { operationResult: decision.operationResult } : {}),
+        });
+        return beginActionLoopReviewCapture();
+      }
+      return persistDecision(decision);
+    }
     case "al-plan": return saveActionLoopPlan(text);
     case "event-match": return saveEventMatchDecision(parseJsonObject(text, "EDT 通知匹配"));
     case "al-review": return applyActionLoopReview(text);
@@ -1675,6 +1707,10 @@ globalThis.onHaminnEvent = event => {
       const providerFailure = ["get-provider", "resume-provider", "provider-result", "provider-file-read", "provider-file-cleanup"].includes(pending);
       const modelFailure = providerFailure;
       const screenFailure = pending === "capture-result" || pending === "action-result";
+      if (modelFailure && state.providerPurpose === "action" && actionLoopExpired()) {
+        appendTrace("action-loop.action-request-failed-after-budget", { stage: pending, message: reason, code: errorCode || null });
+        return beginActionLoopReviewCapture();
+      }
       if (pending === "action-result" && ["back", "home"].includes(state.pendingAction?.type) &&
           state.pendingOperation?.bridgeOperationId) {
         const receipt = beginGlobalActionReceipt({

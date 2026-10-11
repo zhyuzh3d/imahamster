@@ -1,7 +1,7 @@
 const DEFAULT_CHAT_COMPLETIONS_PATH = "/v1/chat/completions";
-const DEFAULT_TIMEOUT_MS = 55_000;
+export const DEFAULT_PROVIDER_TIMEOUT_MS = 55_000;
 
-export function buildChatCompletionRequest(provider, messages, { timeoutMs = DEFAULT_TIMEOUT_MS, userAgent = false } = {}) {
+export function buildChatCompletionRequest(provider, messages, { timeoutMs = DEFAULT_PROVIDER_TIMEOUT_MS, userAgent = false } = {}) {
   const baseUrl = String(provider?.baseUrl || "").replace(/\/+$/, "");
   const endpointPath = provider?.endpointPath || DEFAULT_CHAT_COMPLETIONS_PATH;
   if (!/^https:\/\//i.test(baseUrl) || !/^\/[A-Za-z0-9._/-]+$/.test(endpointPath)) {

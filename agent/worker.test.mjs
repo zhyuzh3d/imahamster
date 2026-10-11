@@ -1178,6 +1178,75 @@ test("action loop timeout invokes LLM review and can extend the current action l
   assert.equal(captures, 2, "timeout review and resumed work both observe the screen");
 });
 
+test("an action response arriving after the AL budget is reviewed before any new action is dispatched", () => {
+  const records = new Map();
+  const originalNow = Date.now;
+  let now = 1_800_000_000_000;
+  const active = { goalId: "goal-late-action", taskId: "task-late-action", runId: "run-late-action",
+    taskType: "one-shot", taskKind: "OST", intent: "完成合成任务", state: "running", step: 4, revision: 5,
+    createdAt: now - 1000, goalAttemptStartedAt: now - 1000, goalDeadlineAt: now + 10 * 60_000,
+    progress: "观察合成界面", activeElapsedMs: 0, activeSegmentStartedAt: now,
+    actionLoop: { index: 1, status: "running", budgetMinutes: 1, estimatedMinutes: 1, elapsedMs: 0, segmentStartedAt: now } };
+  records.set("agent-runtime:active-goal", { value: active, revision: "1" });
+  let captures = 0;
+  let reviewCalls = 0;
+  let actionCalls = 0;
+  let taps = 0;
+  const requestTimeouts = [];
+
+  function tool(method, params) {
+    if (method === "data.get") return params.key === "provider"
+      ? { value: { baseUrl: "https://model.example", apiKey: "x".repeat(24), model: "vision-model" } }
+      : records.get(`${params.collection}:${params.key}`) || null;
+    if (method === "data.scan") return { items: [] };
+    if (method === "data.put") { records.set(`${params.collection}:${params.key}`, { value: params.value, revision: "2" }); return { revision: "2" }; }
+    if (method === "data.batch") {
+      for (const item of params.operations) records.set(`${item.collection}:${item.key}`, { value: item.value, revision: "2" });
+      return { results: [] };
+    }
+    if (method === "interaction.capture") { captures += 1; return { mime: "image/jpeg", dataBase64: "synthetic-frame" }; }
+    if (method === "interaction.tap") { taps += 1; return { accepted: true }; }
+    if (method === "network.request") {
+      requestTimeouts.push(params.timeoutMs);
+      const body = JSON.parse(params.bodyText);
+      const userText = body.messages[1].content;
+      const prompt = Array.isArray(userText) ? userText.map(part => part.text || "").join("\n") : String(userText || "");
+      if (prompt.includes("本 AL 已到预算检查点")) reviewCalls += 1;
+      if (!prompt.includes("本 AL 已到预算检查点") && !prompt.includes("判断是否值得保存经验")) actionCalls += 1;
+      const result = modelCall(params, () => actionCalls === 1
+        ? { state: "action", evidence: "继续尝试一个新的合成界面动作", action: { type: "tap", target: "Synthetic button", label: "Continue", x: 0.5, y: 0.5 } }
+        : { state: "done", evidence: "复盘后重新观察，合成目标已完成" });
+      if (actionCalls === 1) now += 61_000;
+      return result;
+    }
+    throw new Error(`Unexpected tool: ${method}`);
+  }
+
+  function deliver(event) {
+    let output = globalThis.onHaminnEvent(event);
+    for (let turn = 0; output?.actions?.length && turn < 80; turn += 1) {
+      const call = output.actions[0];
+      output = globalThis.onHaminnEvent({ type: "tool.result", callId: call.callId, ok: true, result: tool(call.method, call.params) });
+    }
+    return output;
+  }
+
+  try {
+    Date.now = () => now;
+    const output = deliver({ type: "start" });
+    const saved = records.get("agent-runtime:active-goal").value;
+    assert.equal(output.state, "done");
+    assert.equal(reviewCalls, 1);
+    assert.equal(taps, 0, "the action returned after the AL budget must not be dispatched before review");
+    assert.ok(captures >= 3, "the Worker should observe before the action, during review, and after resuming");
+    assert.equal(saved.trace.some(event => event.phase === "action-loop.action-decision-deferred"), true);
+    assert.equal(saved.trace.find(event => event.phase === "action-loop.review")?.choice, "continue");
+    assert.ok(requestTimeouts.every(timeout => timeout <= 55_000), "provider requests must retain their normal upper bound");
+  } finally {
+    Date.now = originalNow;
+  }
+});
+
 test("LLM can start a new action loop after timeout and choose a reusable experience after success", () => {
   const records = new Map();
   const active = { goalId: "goal-new-action-loop", taskId: "task-new-action-loop", runId: "run-new-action-loop",
