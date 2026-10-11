@@ -103,6 +103,22 @@
       </details>
     </section>
 
+    <section id="tool-panel" class="card memory-panel" aria-labelledby="tool-title">
+      <div class="card-heading">
+        <h2 id="tool-title">Tool Engine · 工具库</h2>
+        <button id="tool-refresh" class="button secondary memory-refresh" type="button" disabled>刷新</button>
+      </div>
+      <p class="memory-description">上方注册工具是 Worker 可执行的有限动作原语；下方候选流程只作为历史参考，不能直接执行或扩大授权。</p>
+      <details id="tool-details" class="memory-details">
+        <summary>查看可执行工具与候选流程</summary>
+        <p class="tool-list-heading">已注册、可执行工具</p>
+        <ul id="tool-registered-list" class="tool-registered-list"></ul>
+        <p id="tool-notice" class="memory-notice" role="status" aria-live="polite">展开后读取本机候选流程</p>
+        <div id="tool-candidate-list" class="tool-candidate-list"></div>
+        <button id="tool-load-more" class="button secondary memory-load-more" type="button" hidden>加载更多</button>
+      </details>
+    </section>
+
     <p class="last-result-label">最近一次任务</p>
     <p id="last-result" class="last-result">尚未运行</p>
     <p id="run-trace" class="last-result" hidden></p>

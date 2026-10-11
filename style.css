@@ -99,6 +99,15 @@ h2 { margin: 0; font-size: 17px; }
 .memory-entry-actions .button { min-height: 34px; padding: 0 10px; font-size: 11px; }
 .memory-entry-actions .danger { color: #a83239; }
 .memory-load-more { min-height: 38px; margin-top: 9px; }
+.tool-list-heading { margin: 12px 0 7px; color: var(--ink); font-size: 11px; font-weight: 700; }
+.tool-registered-list { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.tool-registered-list li { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 5px 12px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 9px; background: #fbfcff; }
+.tool-registered-list strong { color: var(--ink); font: 600 11px/1.4 ui-monospace, SFMono-Regular, Consolas, monospace; overflow-wrap: anywhere; }
+.tool-registered-list span, .tool-candidate-refs { color: var(--muted); font-size: 10px; line-height: 1.5; overflow-wrap: anywhere; }
+.tool-candidate-list { display: grid; gap: 9px; }
+.tool-candidate-entry { padding: 11px; border: 1px solid var(--line); border-radius: 12px; background: #fbfcff; }
+.tool-candidate-editor { width: 100%; min-height: 48px; box-sizing: border-box; padding: 8px; border: 1px solid var(--line); border-radius: 8px; background: white; color: var(--ink); font: inherit; font-size: 12px; resize: vertical; }
+.tool-candidate-refs { margin: 7px 0 0; }
 .bp-list { display: grid; gap: 9px; }
 .bp-entry { padding: 11px; border: 1px solid var(--line); border-radius: 12px; background: #fbfcff; }
 .bp-entry-title { margin: 0; color: var(--ink); font-size: 12px; font-weight: 700; overflow-wrap: anywhere; }

@@ -45,6 +45,7 @@
   let workerControlBusy = false;
   let hoControlModule = null;
   let selfModelPanelController = null;
+  let toolPanelController = null;
 
 
 
@@ -1360,6 +1361,14 @@
     if (ready) setMessage("自我模型管理界面无法加载：" + String(error?.message || error).slice(0, 180), "error");
   });
 
+  void import("./ui/tools.mjs").then(({ mountToolPanel }) => {
+    toolPanelController = mountToolPanel();
+    toolPanelController.setReady(ready && window.haminn?.isReady === true);
+  }).catch(error => {
+    console.error("ImHamster tool panel failed to load", error);
+    if (ready) setMessage("工具库管理界面无法加载：" + String(error?.message || error).slice(0, 180), "error");
+  });
+
   window.addEventListener("pagehide", () => {
     if (!operationRunning || backgroundHandedOff) return;
     const stepCount = activeTrace?.events.filter((event) => event.phase === "step-start").length || 0;
@@ -1379,6 +1388,7 @@
     if (ready) return;
     ready = true;
     selfModelPanelController?.setReady(window.haminn?.isReady === true);
+    toolPanelController?.setReady(window.haminn?.isReady === true);
     try {
       const consentRecord = await haminn.data.get({ collection: "screen-interaction", key: "consent-v2" });
       consent.checked = consentRecord?.value === true;
