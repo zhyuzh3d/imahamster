@@ -590,7 +590,8 @@ JS 测试适合纯状态与组装；QuickJS/Android 仪器测试负责真实模�
 - 按产品术语澄清 OST 是用户目标的一次执行边界，Task 是 HO 在 OST 内调度的工作单元；Task 可以对应一个 AL，也可在换路/续行时跨多个 AL。复杂 OST 的拆分由 LLM 决定，HO 只校验依赖结构、持久化和调度，不替 LLM 规划具体内容或验收结果。
 - 新增 `agent/ho/task-plan.mjs`，统一 Worker 与 AgentStore 的 Task 结构校验及依赖索引到 Task ID 映射。初始 Task 分类可选择不拆分，或提交 2–31 个只依赖较早 Task 的子任务；HO 原子保存协调 Task、子 Task 与活动检查点，并依赖顺序逐一调度。子任务输出 `task-done` 只结束当前子任务；全部子任务处理后，HO 把控制交回 LLM 复核整体目标，只有 LLM 输出 `done` 才记录 OST 完成。LLM 提前判定整体目标已完成时，未完成子任务会被记录为取消，不继续调度。
 - CAE 为模型提供当前 Task、任务依赖/状态及整体目标复核上下文；追踪 manifest 记录 Task 引用和依赖，不复制子任务的私密正文。子 Task 完成与后续调度分成两个原子持久化阶段，Worker 在两阶段之间重启时可从 `lastDecision=task-done` 恢复调度。`AgentStore.createTaskPlan()` 复用同一结构校验，避免并行维护两套 DAG 规则。
-- 全量 `node --test` 122/122 通过；涉及文件的 `node --check` 与 `git diff --check` 通过。此实现目前串行调度屏幕 Task，未实现互不争用设备的并发 Task；当前 `adb devices -l` 仅有 `emulator-5554`，USB 真机不可见，因此此项仅有合成 Worker/存储测试证据，尚未部署或完成手机/微信验收。
+- 接入 HO 暂停/继续/取消时同步维护 Task 图：暂停保留待运行子 Task，恢复把当前子 Task 交回执行，取消则在同一事务中取消所有未完成子 Task 和协调 Task；已完成子 Task 不会被并发控制覆盖。若 `task-done` 已落库但控制先于 scheduler handoff 到达，恢复仍从该检查点推进，不会重做已完成单元。
+- 全量 `node --test` 127/127 通过；涉及文件的 `node --check` 与 `git diff --check` 通过。此实现目前串行调度屏幕 Task，未实现互不争用设备的并发 Task；当前 `adb devices -l` 仅有 `emulator-5554`，USB 真机不可见，因此此项仅有合成 Worker/存储测试证据，尚未完成手机/微信验收。
 
 ## 11. 交付与完成判定
 

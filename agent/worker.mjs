@@ -833,6 +833,7 @@ function continueAfterWorkerQueueDrain() {
     startActiveSegment();
     return persist("tick-saved");
   }
+  if (state.taskGraph && state.lastDecision?.state === "task-done") return advanceTaskGraph();
   state.state = "active";
   state.activeSegmentStartedAt = null;
   startActiveSegment();
@@ -1060,7 +1061,8 @@ function prepareGoalResume(reply = "") {
   if (reply) state.intent += `；用户补充：${String(reply).slice(0, 1200)}`;
   state.state = "active";
   state.waiting = null;
-  if (state.taskGraph && !state.taskReviewMode && state.taskGraph.tasks.some(task => task.taskId === state.taskId && task.state === "waiting")) {
+  if (state.taskGraph && !state.taskReviewMode && state.taskGraph.tasks.some(task =>
+    task.taskId === state.taskId && ["waiting", "paused"].includes(task.state))) {
     state.taskGraph = setSubtaskState(state.taskGraph, state.taskId, "running", { at: Date.now() });
   }
   state.recoveryAttempts = 0;
@@ -1070,9 +1072,9 @@ function prepareGoalResume(reply = "") {
 }
 
 function continueAfterActiveLoad() {
-  if (state.taskGraph && state.lastDecision?.state === "task-done") return advanceTaskGraph();
   if (state.state === "paused") return { state: "paused", progress: state.progress || "任务已暂停" };
   if (state.waiting?.userRequired) return { state: "waiting", progress: state.progress, userRequired: true };
+  if (state.taskGraph && state.lastDecision?.state === "task-done") return advanceTaskGraph();
   state.state = "active";
   state.activeSegmentStartedAt = null;
   startActiveSegment();
@@ -2139,6 +2141,7 @@ function advanceAfterTool(event) {
       if (!providerValid(result?.value)) return pauseForUser("后台任务无法读取有效模型配置", "model-configuration");
       provider = result.value;
       appendTrace("model.ready", { model: provider.model, resumed: true });
+      if (state.taskGraph && state.lastDecision?.state === "task-done") return advanceTaskGraph();
       if (state.taskGraph) {
         pending = "resume-saved";
         return action("data.batch", { operations: updateGoalAndTask(state.lastDecision) });

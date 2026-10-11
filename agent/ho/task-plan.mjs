@@ -97,7 +97,7 @@ export function nextReadySubtask(graph) {
 }
 
 export function setSubtaskState(graph, taskId, state, { progress, at = Date.now() } = {}) {
-  if (!graph || !Array.isArray(graph.tasks) || !["ready", "running", "waiting", "done", "cancelled"].includes(state)) {
+  if (!graph || !Array.isArray(graph.tasks) || !["ready", "running", "waiting", "paused", "done", "cancelled"].includes(state)) {
     throw new TypeError("Task graph or next Task state is invalid");
   }
   let found = false;
@@ -109,6 +109,24 @@ export function setSubtaskState(graph, taskId, state, { progress, at = Date.now(
   });
   if (!found) throw new Error(`Task is not in this Goal plan: ${taskId}`);
   return { ...graph, tasks };
+}
+
+/** Apply user lifecycle controls to the durable Task projection without changing completed work. */
+export function transitionTaskGraphForControl(graph, taskId, command, { at = Date.now(), progress = "" } = {}) {
+  if (!graph?.tasks?.length || !["pause", "resume", "cancel"].includes(command)) return graph || null;
+  const tasks = graph.tasks.map(task => {
+    let nextState = task.state;
+    if (command === "cancel" && !["done", "cancelled"].includes(task.state)) nextState = "cancelled";
+    else if (task.taskId === taskId && command === "pause" && task.state !== "done") nextState = "paused";
+    else if (task.taskId === taskId && command === "resume" && ["paused", "waiting"].includes(task.state)) nextState = "ready";
+    if (nextState === task.state) return task;
+    return { ...task, state: nextState, revision: Number(task.revision || 0) + 1,
+      progress: progress || task.progress || "", waiting: nextState === "paused" ? { reason: progress, since: Number(at) } : null,
+      updatedAt: Number(at) };
+  });
+  const coordinatorRevision = graph.coordinatorTaskId === taskId || command === "cancel"
+    ? Number(graph.coordinatorRevision || 0) + 1 : Number(graph.coordinatorRevision || 0);
+  return { ...graph, tasks, coordinatorRevision };
 }
 
 export function taskGraphContext(graph, currentTaskId, { review = false } = {}) {

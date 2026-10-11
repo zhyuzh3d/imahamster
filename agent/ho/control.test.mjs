@@ -35,6 +35,53 @@ test("cancel records the queue purge count while leaving queue IO to the Worker"
   assert.equal(result.operations.some(operation => operation.collection === "inbox"), false);
 });
 
+test("pause and resume keep the current decomposed Task aligned with HO state", () => {
+  const children = [
+    { taskId: "t1", goalId: "g1", runId: "r1", objective: "第一项", state: "running", dependencies: [], revision: 2 },
+    { taskId: "t2", goalId: "g1", runId: "r2", objective: "第二项", state: "ready", dependencies: ["t1"], revision: 1 },
+  ];
+  const active = activeRecords("active", { taskGraph: {
+    coordinatorTaskId: "tc", coordinatorRunId: "rc", coordinatorRevision: 3, tasks: children,
+  } });
+  const paused = prepareUserControlTransition({ ...active, command: "pause", now: 1000 });
+  assert.deepEqual(paused.nextActive.taskGraph.tasks.map(item => item.state), ["paused", "ready"]);
+  assert.equal(paused.operations.find(item => item.collection === "tasks" && item.key === "t:t1").value.state, "paused");
+  const resumed = prepareUserControlTransition({ ...activeRecords("paused", {
+    ...active.activeRecord.value, state: "paused", taskGraph: paused.nextActive.taskGraph,
+  }), command: "resume", now: 2000 });
+  assert.deepEqual(resumed.nextActive.taskGraph.tasks.map(item => item.state), ["ready", "ready"]);
+  assert.equal(resumed.operations.find(item => item.collection === "tasks" && item.key === "t:t1").value.state, "ready");
+});
+
+test("cancel marks unfinished child Tasks and the coordinator cancelled atomically", () => {
+  const active = activeRecords("active", { taskGraph: {
+    coordinatorTaskId: "tc", coordinatorRunId: "rc", coordinatorRevision: 3,
+    tasks: [
+      { taskId: "t1", goalId: "g1", runId: "r1", objective: "第一项", state: "running", dependencies: [], revision: 2 },
+      { taskId: "t2", goalId: "g1", runId: "r2", objective: "第二项", state: "ready", dependencies: ["t1"], revision: 1 },
+      { taskId: "t3", goalId: "g1", runId: "r3", objective: "已完成项", state: "done", dependencies: [], revision: 2 },
+    ],
+  } });
+  const cancelled = prepareUserControlTransition({ ...active, command: "cancel", now: 3000 });
+  assert.deepEqual(cancelled.nextActive.taskGraph.tasks.map(item => item.state), ["cancelled", "cancelled", "done"]);
+  assert.equal(cancelled.nextActive.taskGraph.coordinatorRevision, 4);
+  assert.equal(cancelled.operations.find(item => item.collection === "tasks" && item.key === "t:t2").value.state, "cancelled");
+  assert.equal(cancelled.operations.find(item => item.collection === "tasks" && item.key === "t:tc").value.state, "cancelled");
+});
+
+test("user control does not rewrite a child already completed before its scheduler handoff", () => {
+  const base = activeRecords("active", { taskGraph: {
+    coordinatorTaskId: "tc", coordinatorRunId: "rc", coordinatorRevision: 3,
+    tasks: [{ taskId: "t1", goalId: "g1", runId: "r1", objective: "第一项", state: "done",
+      dependencies: [], revision: 2, progress: "模型已完成当前单元" }],
+  } });
+  base.activeRecord.value.lastDecision = { state: "task-done", evidence: "模型已完成当前单元" };
+  base.taskRecord.value.state = "done";
+  const paused = prepareUserControlTransition({ ...base, command: "pause", now: 4000 });
+  assert.equal(paused.nextActive.taskGraph.tasks[0].state, "done");
+  assert.equal(paused.operations.some(item => item.collection === "tasks" && item.key === "t:t1"), false);
+});
+
 test("resume clears waiting and applies the user's continuation through HO", () => {
   const result = prepareUserControlTransition({ ...activeRecords("paused", { recoveryAttempts: 7 }),
     command: "resume", reply: "只检查会话标题", now: 3000 });

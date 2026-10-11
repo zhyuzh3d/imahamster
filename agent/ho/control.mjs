@@ -1,4 +1,5 @@
 import { makeJournalEntry } from "../observability/journal.mjs";
+import { transitionTaskGraphForControl } from "./task-plan.mjs";
 
 const ACTIVE_COLLECTION = "agent-runtime";
 const ACTIVE_KEY = "active-goal";
@@ -42,6 +43,7 @@ export function prepareUserControlTransition({ activeRecord, goalRecord, taskRec
   const intent = reply ? `${value.intent}；用户补充：${String(reply).slice(0, 1200)}` : value.intent;
   const retryAfterTimeLimit = command === "resume" && value.waiting?.category === "goal-time-limit";
   const nextWaiting = command === "resume" ? null : value.waiting;
+  const taskGraph = transitionTaskGraphForControl(value.taskGraph, value.taskId, command, { at: now, progress });
   const sequence = Number(value.journalSequence || 0) + 1;
   const event = { at: now, step: Number(value.step || 0), phase: `user-control.${command}`,
     source: "user", replyLength: command === "resume" ? String(reply).length : 0,
@@ -52,6 +54,7 @@ export function prepareUserControlTransition({ activeRecord, goalRecord, taskRec
     progress,
     intent,
     waiting: nextWaiting,
+    ...(taskGraph ? { taskGraph } : {}),
     pausedAt: command === "pause" ? now : value.pausedAt,
     cancelledAt: command === "cancel" ? now : value.cancelledAt,
     recoveryAttempts: command === "resume" ? 0 : value.recoveryAttempts,
@@ -78,13 +81,33 @@ export function prepareUserControlTransition({ activeRecord, goalRecord, taskRec
     revision: Number(goal.value.revision || 0) + 1,
     updatedAt: now,
   }, goal.revision));
-  if (task?.value) operations.push(put("tasks", `t:${value.taskId}`, {
+  const graphCurrentTask = taskGraph?.tasks?.find(item => item.taskId === value.taskId);
+  const previousGraphCurrentTask = value.taskGraph?.tasks?.find(item => item.taskId === value.taskId);
+  if (task?.value && !["done", "cancelled"].includes(previousGraphCurrentTask?.state)) operations.push(put("tasks", `t:${value.taskId}`, {
     ...task.value,
-    state: control.taskState,
+    state: graphCurrentTask?.state || control.taskState,
     progress,
     waiting: command === "pause" ? { reason: progress, since: now } : null,
     revision: Number(task.value.revision || 0) + 1,
     updatedAt: now,
   }, task.revision));
+  if (value.taskGraph && taskGraph) {
+    for (let index = 0; index < taskGraph.tasks.length; index += 1) {
+      const previous = value.taskGraph.tasks[index];
+      const next = taskGraph.tasks[index];
+      if (next.state === previous?.state || next.taskId === value.taskId) continue;
+      operations.push(put("tasks", `t:${next.taskId}`, next));
+    }
+    if (command === "cancel" && taskGraph.coordinatorTaskId !== value.taskId) {
+      const nowRevision = Number(taskGraph.coordinatorRevision || 1);
+      operations.push(put("tasks", `t:${taskGraph.coordinatorTaskId}`, {
+        schemaVersion: 1, taskId: taskGraph.coordinatorTaskId, goalId: value.goalId,
+        runId: taskGraph.coordinatorRunId, revision: nowRevision, kind: "coordination",
+        objective: value.intent, state: "cancelled", dependencies: taskGraph.tasks.map(item => item.taskId),
+        objectKey: null, progress, waiting: null, resultRefs: [],
+        createdAt: value.createdAt || now, updatedAt: now,
+      }));
+    }
+  }
   return { updated: true, queuedCancelled, intent, nextActive, operations };
 }

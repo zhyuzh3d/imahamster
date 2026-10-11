@@ -2560,3 +2560,59 @@ test("Worker restart resumes dependency scheduling after a durable task-done dec
   assert.equal(savedActive.taskId, second.taskId);
   assert.equal(savedActive.lastDecision, null);
 });
+
+test("goal cancellation updates all unfinished decomposed Tasks in the same HO transaction", async () => {
+  await import(`./worker.mjs?task-graph-cancel=${Date.now()}`);
+  const records = new Map();
+  const now = Date.now();
+  const active = {
+    goalId: "goal-graph-cancel", taskId: "task-graph-current", runId: "run-current",
+    intent: "处理合成会话并核对回复", state: "active", taskType: "one-shot", taskKind: "OST",
+    step: 2, revision: 4, createdAt: now, progress: "执行第一项",
+    taskGraph: { coordinatorTaskId: "task-graph-coordinator", coordinatorRunId: "run-coordinator",
+      coordinatorRevision: 2, currentTaskId: "task-graph-current", createdAt: now, tasks: [
+        { schemaVersion: 1, taskId: "task-graph-current", goalId: "goal-graph-cancel", runId: "run-current",
+          revision: 1, kind: "screen-work", objective: "处理第一项", state: "running", dependencies: [],
+          objectKey: null, progress: "", waiting: null, resultRefs: [], createdAt: now, updatedAt: now, planIndex: 0 },
+        { schemaVersion: 1, taskId: "task-graph-next", goalId: "goal-graph-cancel", runId: "run-next",
+          revision: 1, kind: "screen-work", objective: "处理第二项", state: "ready", dependencies: ["task-graph-current"],
+          objectKey: null, progress: "", waiting: null, resultRefs: [], createdAt: now, updatedAt: now, planIndex: 1 },
+      ] },
+    trace: [],
+  };
+  records.set("agent-runtime:active-goal", { value: active, revision: 1 });
+  records.set("goals:g:goal-graph-cancel", { value: { goalId: active.goalId, state: "active", revision: 4 }, revision: 8 });
+  records.set("tasks:t:task-graph-current", { value: { ...active.taskGraph.tasks[0] }, revision: 2 });
+  records.set("tasks:t:task-graph-next", { value: { ...active.taskGraph.tasks[1] }, revision: 2 });
+  records.set("tasks:t:task-graph-coordinator", { value: {
+    schemaVersion: 1, taskId: "task-graph-coordinator", goalId: active.goalId, runId: "run-coordinator",
+    revision: 2, kind: "coordination", objective: active.intent, state: "waiting",
+    dependencies: ["task-graph-current", "task-graph-next"], objectKey: null,
+    progress: "等待子任务完成", waiting: null, resultRefs: [], createdAt: now, updatedAt: now,
+  }, revision: 2 });
+  function tool(method, params) {
+    if (method === "data.get") return records.get(`${params.collection}:${params.key}`) || null;
+    if (method === "data.scan") return { items: [] };
+    if (method === "data.batch") {
+      for (const operation of params.operations) {
+        const key = `${operation.collection}:${operation.key}`;
+        const current = records.get(key);
+        records.set(key, { value: operation.value, revision: Number(current?.revision || 0) + 1 });
+      }
+      return { results: [] };
+    }
+    throw new Error(`Unexpected tool: ${method}`);
+  }
+  let output = globalThis.onHaminnEvent({ type: "goal.control", eventId: "cancel-graph", command: "cancel" });
+  for (let turn = 0; output?.actions?.length && turn < 16; turn += 1) {
+    const call = output.actions[0];
+    output = globalThis.onHaminnEvent({ type: "tool.result", callId: call.callId, ok: true,
+      result: tool(call.method, call.params) });
+  }
+  assert.equal(output.controlApplied, true);
+  assert.equal(records.get("agent-runtime:active-goal").value.taskGraph.tasks[0].state, "cancelled");
+  assert.equal(records.get("agent-runtime:active-goal").value.taskGraph.tasks[1].state, "cancelled");
+  assert.equal(records.get("tasks:t:task-graph-current").value.state, "cancelled");
+  assert.equal(records.get("tasks:t:task-graph-next").value.state, "cancelled");
+  assert.equal(records.get("tasks:t:task-graph-coordinator").value.state, "cancelled");
+});
