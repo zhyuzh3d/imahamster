@@ -61,3 +61,33 @@ test("a completed OST exposes a separate retry control when background queue rec
   assert.equal(state.queueRecoveryNeedsUser, true);
   assert.equal(state.resumeEnabled, true);
 });
+
+test("decomposed OST progress identifies the current HO Task and completed units", () => {
+  const state = deriveWorkerPanelState({
+    activeRecord: { value: { state: "active", taskId: "t2", taskGraph: { tasks: [
+      { taskId: "t1", objective: "读取新消息", state: "done", planIndex: 0 },
+      { taskId: "t2", objective: "拟定并核对回复", state: "running", planIndex: 1 },
+      { taskId: "t3", objective: "记录结果", state: "ready", planIndex: 2 },
+    ] } } },
+    serviceState: "running",
+  });
+
+  assert.deepEqual(state.taskGraphProgress, {
+    completed: 1, total: 3, currentLabel: "第 2/3 项：拟定并核对回复",
+  });
+});
+
+test("whole-goal review is shown separately from the completed child Tasks", () => {
+  const state = deriveWorkerPanelState({
+    activeRecord: { value: { state: "active", taskId: "tc", taskReviewMode: true,
+      taskGraph: { coordinatorTaskId: "tc", tasks: [
+        { taskId: "t1", objective: "第一项", state: "done" },
+        { taskId: "t2", objective: "第二项", state: "done" },
+      ] } } },
+    serviceState: "running",
+  });
+
+  assert.deepEqual(state.taskGraphProgress, {
+    completed: 2, total: 2, currentLabel: "整体目标复核",
+  });
+});

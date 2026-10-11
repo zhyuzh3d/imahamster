@@ -1,5 +1,17 @@
 const TERMINAL_GOAL_STATES = new Set(["done", "failed", "cancelled"]);
 
+function taskGraphProgress(active) {
+  const tasks = active?.taskGraph?.tasks;
+  if (!Array.isArray(tasks) || tasks.length < 2 || tasks.length > 31) return null;
+  const currentIndex = tasks.findIndex(task => task?.taskId === active.taskId);
+  const current = currentIndex >= 0 ? tasks[currentIndex] : null;
+  const reviewingGoal = active.taskReviewMode === true && active.taskId === active.taskGraph.coordinatorTaskId;
+  const currentLabel = reviewingGoal ? "整体目标复核"
+    : current ? `第 ${Number.isInteger(current.planIndex) ? current.planIndex + 1 : currentIndex + 1}/${tasks.length} 项：${String(current.objective || "").slice(0, 120)}`
+      : "等待 HO 恢复调度";
+  return { completed: tasks.filter(task => task?.state === "done").length, total: tasks.length, currentLabel };
+}
+
 export function deriveWorkerPanelState({ activeRecord, queuedCount = 0, serviceState, lastResult, eventTasks = [] }) {
   const active = activeRecord?.value || null;
   const liveEventTasks = eventTasks.map(item => item?.value).filter(item => item && item.state !== "cancelled");
@@ -17,5 +29,5 @@ export function deriveWorkerPanelState({ activeRecord, queuedCount = 0, serviceS
   const resumeEnabled = orphanedHandoff || queueRecoveryNeedsUser || (activeCanControl &&
     (active.state === "paused" || active?.waiting?.userRequired || active.state === "failed" || serviceState !== "running"));
   return { active, liveEventTasks, visible, interruptedHandoff, orphanedHandoff, persistedCurrentGoal,
-    queueRecoveryNeedsUser, activeCanControl, resumeEnabled };
+    queueRecoveryNeedsUser, activeCanControl, resumeEnabled, taskGraphProgress: taskGraphProgress(active) };
 }

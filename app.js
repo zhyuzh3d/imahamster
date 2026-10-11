@@ -817,6 +817,10 @@
       lines.push(`后台事件队列恢复${recovery.userRequired ? "需要重试" : "自动重试中"}：${String(recovery.error || "存储读取失败").slice(0, 180)}（${recovery.attempts || 0}/${recovery.maxAttempts || 8}）`);
     }
     if (displayActive?.intent) lines.push(displayActive.intent.slice(0, 180));
+    if (panelState.taskGraphProgress) {
+      const { completed, total, currentLabel } = panelState.taskGraphProgress;
+      lines.push(`子任务 ${completed}/${total} 已完成 · ${currentLabel}`);
+    }
     const actionLoop = displayActive?.actionLoop || displayActive?.loop;
     if (actionLoop) lines.push(`AL ${actionLoop.index || 1}：预估 ${actionLoop.estimatedMinutes || "待定"} 分钟 / 预算 ${actionLoop.budgetMinutes || 15} 分钟`);
     if (Number.isFinite(displayActive?.goalDeadlineAt) && !["done", "failed", "cancelled", "event-driven"].includes(displayActive.state)) {

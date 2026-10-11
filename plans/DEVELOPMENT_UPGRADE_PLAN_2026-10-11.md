@@ -593,6 +593,12 @@ JS 测试适合纯状态与组装；QuickJS/Android 仪器测试负责真实模�
 - 接入 HO 暂停/继续/取消时同步维护 Task 图：暂停保留待运行子 Task，恢复把当前子 Task 交回执行，取消则在同一事务中取消所有未完成子 Task 和协调 Task；已完成子 Task 不会被并发控制覆盖。若 `task-done` 已落库但控制先于 scheduler handoff 到达，恢复仍从该检查点推进，不会重做已完成单元。
 - 全量 `node --test` 127/127 通过；涉及文件的 `node --check` 与 `git diff --check` 通过。此实现目前串行调度屏幕 Task，未实现互不争用设备的并发 Task；当前 `adb devices -l` 仅有 `emulator-5554`，USB 真机不可见，因此此项仅有合成 Worker/存储测试证据，尚未完成手机/微信验收。
 
+### 10.37 Task 图进度对用户可见（2026-10-11）
+
+- HO 已能把复杂 OST 拆分并逐项调度，但执行面板此前只显示原始目标、AL 与自由文本进度，用户看不到当前子 Task、完成数或正在进行的整体目标复核。
+- ui/worker-panel-state.mjs 现在从活动 OST 的持久 Task 图派生有界进度摘要，app.js 将其并入现有状态行；简单 OST 不增加多余内容。完成数直接来自 Task 状态，当前项来自 HO 调度 ID，最终复核明确显示为“整体目标复核”，UI 不介入完成判断或状态写入。
+- 全量 node --test 129/129 通过，node --check app.js、面板模块语法检查和 git diff --check 通过。Haminn DEV revision 1227 先于本次 UI 改动；设备仍仅有模拟器可见，因此新摘要尚未在手机渲染验收。
+
 ## 11. 交付与完成判定
 
 ImHamster 与 Haminn 独立提交、验证和推送；每次提交前核对各自 Git 根与 origin，保留无关工作区改动。宿主新增合同需同步 SDK/能力文档/实际实现，消费者只接入确实支持的能力。
