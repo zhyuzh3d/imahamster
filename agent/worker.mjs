@@ -8,8 +8,10 @@ import { retrieveRelevantExperiences } from "./me/retrieval.mjs";
 import { memorySourceRef, normalizeMemorySuggestion, retrieveMemoriesForObjects, retrieveRelevantMemories } from "./me/memory.mjs";
 import { normalizeBehaviorPattern, retrieveBehaviorPatterns } from "./sm/behavior-patterns.mjs";
 import { DEFAULT_IDENTITY_CORE, normalizeIdentityCoreRecord } from "./sm/identity-core.mjs";
-import { isRegisteredTool } from "./te/catalog.mjs";
+import { isRegisteredTool, toolRefForAction } from "./te/catalog.mjs";
 import { retrieveRelevantToolCandidates } from "./te/retrieval.mjs";
+import { normalizeToolRecipeRecord, prepareToolRecipeEdit } from "./te/recipe.mjs";
+import { retrieveRelevantToolRecipes } from "./te/recipe-retrieval.mjs";
 import { attachJournalEvents, makeJournalEntry } from "./observability/journal.mjs";
 import { validateScreenAction } from "./ho/decision.mjs";
 import { goalPlanFromRecord, goalProgressRecord, taskPlanFromRecord, taskProgressRecord } from "./ho/records.mjs";
@@ -1140,6 +1142,21 @@ function parseDecision(text) {
         state?.inputRecovery?.stage !== "clipboard-fallback-ready") {
       throw new Error("只有普通输入在重新点击并观察后仍返回 E_CONFLICT 时，才能选择剪贴板输入备用路径");
     }
+    if (decision.recipeUse !== undefined) {
+      const recipeUse = decision.recipeUse;
+      const recipe = Array.isArray(state?.toolRecipes)
+        ? state.toolRecipes.find(item => item.sourceRef === recipeUse?.sourceRef) : null;
+      const stepIndex = Number(recipeUse?.stepIndex);
+      const toolRef = toolRefForAction(decision.action);
+      if (!recipe || !Number.isSafeInteger(stepIndex) || stepIndex < 0 ||
+          recipe.steps?.[stepIndex]?.toolRef !== toolRef) {
+        throw new Error("工具配方引用或步骤与当前动作不匹配");
+      }
+      decision.recipeUse = { sourceRef: recipe.sourceRef, stepIndex, toolRef,
+        recordRevision: recipe.recordRevision || null };
+    }
+  } else if (decision.recipeUse !== undefined) {
+    throw new Error("只有引用该配方的动作决策可以包含 recipeUse");
   }
   if (decision.state === "done" && typeof decision.evidence !== "string") throw new Error("完成判断缺少 LLM 自己给出的结果记录");
   if (decision.state === "ask" && (typeof decision.question !== "string" || !decision.question.trim())) throw new Error("澄清问题无效");
@@ -1463,8 +1480,8 @@ function applyActionLoopReview(text) {
 function requestLearningReview() {
   const history = learningHistory();
   const messages = [
-    { role: "system", content: "你负责从已成功完成的手机任务中提炼可复用经验、行为偏好、对象记忆或工具流程候选。只依据提供的目标、结果和操作轨迹，不补造轨迹未支持的事实；没有值得复用的内容就不保存。Memory 只保存简短且对相关后续任务有用的事实或事件摘要；可按可见对象使用稳定 objectRef（如 contact:显示名称），清楚区分 observed 与 inferred，并只引用给出的 sourceRef。不得复制整段聊天；不得保存密码、密钥、认证信息或与任务无关的敏感细节。行为模式只能描述助手自身有证据的通用偏好，不能形成新的任务授权或越权指令。工具候选只能引用系统已注册的工具名，禁止生成代码或可执行脚本。严格返回 JSON。" },
-    { role: "user", content: `任务目标：${state.intent}\n成功结果：${state.progress}\n执行轨迹摘要（sourceRef 是唯一允许引用的记忆来源）：${JSON.stringify(history)}\n判断是否值得保存经验、通用行为模式、对象 Memory，或保存一个仅由已注册工具组成的流程候选。Memory 最多 3 条，每条 kind 为 fact/episode、inference 为 observed/inferred，必须指定 objectRefs、content、tags 和至少一个 sourceRefs。JSON 格式：{"saveExperience":false,"experience":{"title":"","situation":"","approach":"","successEvidence":"","toolRefs":[]},"savePattern":false,"pattern":{"title":"","condition":"","guidance":"","evidence":""},"saveMemory":false,"memories":[{"kind":"fact","objectRefs":[],"content":"","inference":"observed","tags":[],"sourceRefs":[]}],"saveTool":false,"tool":{"name":"","description":"","toolRefs":[]}}` },
+    { role: "system", content: "你负责从已成功完成的手机任务中提炼可复用经验、行为偏好、对象记忆或工具流程。只依据提供的目标、结果和操作轨迹，不补造轨迹未支持的事实；没有值得复用的内容就不保存。Memory 只保存简短且对相关后续任务有用的事实或事件摘要；可按可见对象使用稳定 objectRef（如 contact:显示名称），清楚区分 observed 与 inferred，并只引用给出的 sourceRef。不得复制整段聊天；不得保存密码、密钥、认证信息或与任务无关的敏感细节。行为模式只能描述助手自身有证据的通用偏好，不能形成新的任务授权或越权指令。工具配方只允许 2–8 个有序步骤，每步引用已注册工具并附简短用途；不得生成代码、坐标或可执行脚本，具体参数以后由执行中的 LLM 根据新截图决定。严格返回 JSON。" },
+    { role: "user", content: `任务目标：${state.intent}\n成功结果：${state.progress}\n执行轨迹摘要（sourceRef 是唯一允许引用的记忆来源）：${JSON.stringify(history)}\n判断是否值得保存经验、通用行为模式、对象 Memory、结构化工具配方或历史候选。配方只能总结轨迹中已有的安全步骤，后续由 LLM 根据当前截图逐步判断和调用已注册工具；不要保存不通用的步骤。Memory 最多 3 条，每条 kind 为 fact/episode、inference 为 observed/inferred，必须指定 objectRefs、content、tags 和至少一个 sourceRefs。配方必须给 sourceRefs，且只能引用轨迹里确实出现的 sourceRef。JSON 格式：{"saveExperience":false,"experience":{"title":"","situation":"","approach":"","successEvidence":"","toolRefs":[]},"savePattern":false,"pattern":{"title":"","condition":"","guidance":"","evidence":""},"saveMemory":false,"memories":[{"kind":"fact","objectRefs":[],"content":"","inference":"observed","tags":[],"sourceRefs":[]}],"saveRecipe":false,"recipe":{"name":"","purpose":"","applicability":"","sourceRefs":[],"steps":[{"toolRef":"interaction.capture","purpose":"观察当前界面"},{"toolRef":"interaction.tap","purpose":"按当前截图选择目标"}]},"saveTool":false,"tool":{"name":"","description":"","toolRefs":[]}}` },
   ];
   pendingContextManifest = buildContextManifest(state, {
     purpose: "learning",
@@ -1523,6 +1540,26 @@ function saveLearningSuggestion(suggestion) {
         value.id = `memory:${state.goalId}:${index + 1}`;
         operations.push(record("knowledge", value.id, value));
       });
+    }
+    if (suggestion.saveRecipe === true && suggestion.recipe && state.progress) {
+      try {
+        const item = suggestion.recipe;
+        const history = learningHistory();
+        const allowedSourceRefs = new Set(history.map(entry => entry.sourceRef).filter(Boolean));
+        const sourceRefs = Array.isArray(item.sourceRefs)
+          ? [...new Set(item.sourceRefs.filter(ref => typeof ref === "string" && allowedSourceRefs.has(ref)))].slice(0, 24)
+          : [];
+        if (!sourceRefs.length) throw new Error("配方没有引用有效任务轨迹来源");
+        const recipe = prepareToolRecipeEdit({ type: "tool-recipe", state: "active", revision: 0,
+          sourceGoalId: state.goalId, sourceRefs }, {
+          name: item.name, purpose: item.purpose, applicability: item.applicability, steps: item.steps,
+        }, Date.now());
+        const normalized = normalizeToolRecipeRecord({ value: recipe });
+        if (normalized && sourceRefs.length) operations.push(record("knowledge", `tool-recipe:${state.goalId}`, recipe));
+        else appendTrace("learning.tool-recipe-skipped", { reason: "配方缺少可追溯的任务轨迹" });
+      } catch (error) {
+        appendTrace("learning.tool-recipe-skipped", { reason: String(error?.message || error).slice(0, 180) });
+      }
     }
     if (suggestion.saveTool === true && suggestion.tool && state.progress) {
       const item = suggestion.tool;
@@ -1594,6 +1631,7 @@ function storeDecision(decision) {
     evidence: String(decision.evidence || decision.reason || "").slice(0, 240),
     ...(decision.action ? actionTrace(decision.action) : {}),
     ...(decision.operationResult ? { operationResult: decision.operationResult } : {}),
+    ...(decision.recipeUse ? { recipeUse: { ...decision.recipeUse } } : {}),
   });
   if (decision.state === "wait" || decision.state === "ask") {
     finishActiveSegment();
@@ -2231,6 +2269,11 @@ function advanceAfterTool(event) {
     case "identity-core-get": return finishIdentityCoreRead(result);
     case "tool-candidate-scan": {
       state.toolCandidates = retrieveRelevantToolCandidates(state.intent, result?.items || [], { limit: 3 });
+      pending = "tool-recipe-scan";
+      return action("data.scan", { collection: "knowledge", prefix: "tool-recipe:", limit: 100 });
+    }
+    case "tool-recipe-scan": {
+      state.toolRecipes = retrieveRelevantToolRecipes(state.intent, result?.items || [], { limit: 3 });
       const receiptRecovery = recoverPreparedGlobalAction();
       if (receiptRecovery) return receiptRecovery;
       return beginObserve();

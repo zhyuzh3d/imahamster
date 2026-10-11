@@ -16,6 +16,10 @@ test("CAE assembles a bounded action context without mutating the OST", () => {
     memoryLookupRefs: ["contact:小明"],
     behaviorPatterns: Array.from({ length: 7 }, (_, index) => ({ title: `模式 ${index}`, condition: "回复消息", guidance: "简洁", evidence: "用户明确选择" })),
     toolCandidates: Array.from({ length: 5 }, (_, index) => ({ name: `候选 ${index}`, description: "仅提供参考", toolRefs: ["interaction.tap"] })),
+    toolRecipes: [{ name: "安全回复", purpose: "逐步核对并回复", applicability: "指定会话", steps: [
+      { toolRef: "interaction.capture", purpose: "观察会话" },
+      { toolRef: "interaction.inputText", purpose: "输入已确认正文" },
+    ], sourceRef: "knowledge:tool-recipe:r1", recordRevision: "3" }],
     pendingOperationId: "op-1",
     pendingOperation: { operationId: "op-1", status: "unknown", intendedContent: "你好".repeat(5000) },
     inputRecovery: { stage: "focus-required", code: "E_CONFLICT" },
@@ -56,10 +60,13 @@ test("CAE assembles a bounded action context without mutating the OST", () => {
   assert.match(context, /我的表达偏好/);
   assert.doesNotMatch(context, /候选 3/);
   assert.match(context, /仅是历史参考文本/);
+  assert.match(context, /相关工具配方/);
+  assert.match(context, /由你结合本轮截图逐步判断/);
+  assert.match(context, /tool-recipe:r1/);
   assert.doesNotMatch(context, /phase-0\"/);
   assert.match(context, /phase-4\"/);
   assert.match(context, /phase-23\"/);
-  assert.equal(context.length < 16_000, true);
+  assert.equal(context.length < 17_000, true);
   assert.deepEqual(state, before);
 });
 
@@ -67,6 +74,7 @@ test("CAE represents missing experience and action history explicitly", () => {
   const context = buildActionContext({ intent: "打开设置", goalDeadlineAt: 60_000 }, { now: 0 });
   assert.match(context, /暂无已验证的相关经验/);
   assert.match(context, /暂无相关的工具流程候选/);
+  assert.match(context, /暂无相关的已验证工具配方/);
   assert.match(context, /近期操作记录：\[\]/);
   assert.doesNotMatch(context, /此前 AL 记录：/);
   assert.match(context, /OST 硬时限剩余 1 分钟/);

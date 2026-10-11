@@ -6,6 +6,7 @@ const LIMITS = Object.freeze({
   memoryLookupRefs: 8,
   behaviorPatterns: 5,
   toolCandidates: 3,
+  toolRecipes: 3,
 });
 
 function list(value) {
@@ -66,7 +67,7 @@ export function buildContextManifest(state, {
   const identityVersion = Math.max(0, Number(identityCore?.version) || 0);
   const selected = selection ? {
     history: [], actionLoops: [], experiences: [], memories: [], memoryLookupRefs: [],
-    behaviorPatterns: [], toolCandidates: [], identityCore: null, taskGraph: selectedTaskGraph(state),
+    behaviorPatterns: [], toolCandidates: [], toolRecipes: [], identityCore: null, taskGraph: selectedTaskGraph(state),
     ...selection,
   } : {
     history: history.map(event => traceRef(state.goalId, event)).filter(Boolean),
@@ -76,6 +77,7 @@ export function buildContextManifest(state, {
     memoryLookupRefs: list(state.memoryLookupRefs).slice(0, LIMITS.memoryLookupRefs).map(value => String(value).slice(0, 120)),
     behaviorPatterns: selectedRecords(state.behaviorPatterns, LIMITS.behaviorPatterns, "self-model"),
     toolCandidates: selectedRecords(state.toolCandidates, LIMITS.toolCandidates, "knowledge"),
+    toolRecipes: selectedRecords(state.toolRecipes, LIMITS.toolRecipes, "knowledge"),
     identityCore: identityCore?.content ? {
       source: identityVersion > 0 ? "user" : "package-default",
       version: identityVersion,
@@ -84,7 +86,7 @@ export function buildContextManifest(state, {
   };
   const omitted = selection ? {
     history: 0, actionLoops: 0, experiences: 0, memories: 0,
-    memoryLookupRefs: 0, behaviorPatterns: 0, toolCandidates: 0,
+    memoryLookupRefs: 0, behaviorPatterns: 0, toolCandidates: 0, toolRecipes: 0,
   } : {
     history: Math.max(0, trace.length - LIMITS.history),
     actionLoops: Math.max(0, list(state.actionLoopHistory).length - LIMITS.actionLoops),
@@ -93,6 +95,7 @@ export function buildContextManifest(state, {
     memoryLookupRefs: Math.max(0, list(state.memoryLookupRefs).length - LIMITS.memoryLookupRefs),
     behaviorPatterns: Math.max(0, list(state.behaviorPatterns).length - LIMITS.behaviorPatterns),
     toolCandidates: Math.max(0, list(state.toolCandidates).length - LIMITS.toolCandidates),
+    toolRecipes: Math.max(0, list(state.toolRecipes).length - LIMITS.toolRecipes),
   };
 
   return {

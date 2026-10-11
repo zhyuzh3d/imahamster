@@ -1,5 +1,6 @@
 import { TOOL_CATALOG } from "../agent/te/catalog.mjs";
 import { normalizeToolCandidateRecord, prepareToolCandidateEdit, prepareToolCandidateState } from "../agent/te/candidate.mjs";
+import { normalizeToolRecipeRecord, prepareToolRecipeEdit, prepareToolRecipeState } from "../agent/te/recipe.mjs";
 
 export function mountToolPanel({ root = globalThis.document, host = () => globalThis.window?.haminn } = {}) {
   const $ = selector => root?.querySelector?.(selector);
@@ -7,10 +8,12 @@ export function mountToolPanel({ root = globalThis.document, host = () => global
   const notice = $("#tool-notice");
   const registered = $("#tool-registered-list");
   const candidates = $("#tool-candidate-list");
+  const recipes = $("#tool-recipe-list");
   const refreshButton = $("#tool-refresh");
   const loadMoreButton = $("#tool-load-more");
   let records = [];
-  let nextAfterKey = null;
+  let nextAfterCandidateKey = null;
+  let nextAfterRecipeKey = null;
   let loading = false;
   let loaded = false;
   let editingKey = "";
@@ -45,6 +48,76 @@ export function mountToolPanel({ root = globalThis.document, host = () => global
       kind.textContent = tool.kind === "screen-observation" ? "可执行 · 观察" : "可执行 · 动作";
       item.append(name, kind);
       registered.append(item);
+    }
+  }
+
+  function renderRecipes() {
+    if (!recipes) return;
+    recipes.replaceChildren();
+    for (const record of records) {
+      const value = normalizeToolRecipeRecord(record, { includeInactive: true });
+      if (!record?.key || !value) continue;
+      const entry = root.createElement("article");
+      entry.className = "tool-candidate-entry";
+      const title = root.createElement("p");
+      title.className = "memory-entry-title";
+      title.textContent = value.name;
+      entry.append(title);
+      const meta = root.createElement("p");
+      meta.className = "memory-entry-meta";
+      meta.textContent = `${value.state === "inactive" ? "已停用配方" : "LLM 引导配方"} · ${value.steps.length} 步`;
+      entry.append(meta);
+      if (editingKey === record.key) {
+        const fields = root.createElement("div");
+        fields.className = "memory-entry-fields";
+        const field = (name, label, current, maxLength) => {
+          const wrapper = root.createElement("label");
+          wrapper.className = "memory-entry-field";
+          wrapper.textContent = label;
+          const control = root.createElement("textarea");
+          control.className = "tool-candidate-editor";
+          control.maxLength = maxLength;
+          control.dataset.toolField = name;
+          control.value = String(current || "");
+          wrapper.append(control);
+          return wrapper;
+        };
+        fields.append(
+          field("name", "配方名称", value.name, 80),
+          field("purpose", "配方用途", value.purpose, 600),
+          field("applicability", "适用条件", value.applicability, 400),
+          field("steps", "有序步骤 JSON（2–8 步，仅限已注册工具）", JSON.stringify(value.steps, null, 2), 5000),
+        );
+        const actions = root.createElement("div");
+        actions.className = "memory-entry-actions";
+        actions.append(button("保存修订", "save", record.key), button("取消", "cancel-edit", record.key));
+        entry.append(fields, actions);
+      } else {
+        const purpose = root.createElement("p");
+        purpose.className = "memory-entry-content";
+        purpose.textContent = value.purpose + (value.applicability ? `（适用：${value.applicability}）` : "");
+        entry.append(purpose);
+        const list = root.createElement("ol");
+        list.className = "tool-candidate-refs";
+        for (const step of value.steps) {
+          const item = root.createElement("li");
+          item.textContent = `${step.toolRef}：${step.purpose}`;
+          list.append(item);
+        }
+        entry.append(list);
+        const actions = root.createElement("div");
+        actions.className = "memory-entry-actions";
+        actions.append(button("修订", "edit", record.key));
+        actions.append(value.state === "inactive"
+          ? button("启用配方", "activate", record.key)
+          : button("停用配方", "deactivate", record.key));
+        actions.append(button("删除", "delete", record.key, "button danger"));
+        if (deleteConfirmKey === record.key) {
+          actions.append(button("确认删除", "confirm-delete", record.key, "button danger"), button("取消", "cancel-delete", record.key));
+        }
+        entry.append(actions);
+      }
+      recipes.append(entry);
     }
   }
 
@@ -116,9 +189,10 @@ export function mountToolPanel({ root = globalThis.document, host = () => global
       candidates.append(entry);
     }
     if (loadMoreButton) {
-      loadMoreButton.hidden = !nextAfterKey;
+      loadMoreButton.hidden = !nextAfterCandidateKey && !nextAfterRecipeKey;
       loadMoreButton.disabled = loading || !ready;
     }
+    renderRecipes();
   }
 
   async function loadPage({ append = false } = {}) {
@@ -126,31 +200,44 @@ export function mountToolPanel({ root = globalThis.document, host = () => global
     if (!ready || !bridge?.isReady || loading) return;
     if (!append) {
       records = [];
-      nextAfterKey = null;
+      nextAfterCandidateKey = null;
+      nextAfterRecipeKey = null;
       loaded = false;
       editingKey = "";
       deleteConfirmKey = "";
       if (candidates) candidates.replaceChildren();
+      if (recipes) recipes.replaceChildren();
     }
     loading = true;
     if (refreshButton) refreshButton.disabled = true;
     if (loadMoreButton) loadMoreButton.disabled = true;
-    setNotice(append ? "正在读取更多候选流程…" : "正在读取候选流程…");
+    setNotice(append ? "正在读取更多工具条目…" : "正在读取本机工具条目…");
     try {
-      const page = await bridge.data.scan({ collection: "knowledge", prefix: "tool-candidate:", limit: 100,
-        ...(append && nextAfterKey ? { afterKey: nextAfterKey } : {}) });
-      const incoming = Array.isArray(page?.items)
-        ? page.items.filter(item => normalizeToolCandidateRecord(item, { includeInactive: true })) : [];
-      const known = new Set(records.map(item => item.key));
-      for (const item of incoming) if (item?.key && !known.has(item.key)) records.push(item);
-      nextAfterKey = page?.nextAfterKey || null;
+      if (!append || nextAfterCandidateKey) {
+        const page = await bridge.data.scan({ collection: "knowledge", prefix: "tool-candidate:", limit: 100,
+          ...(append && nextAfterCandidateKey ? { afterKey: nextAfterCandidateKey } : {}) });
+        const incoming = Array.isArray(page?.items)
+          ? page.items.filter(item => normalizeToolCandidateRecord(item, { includeInactive: true })) : [];
+        const known = new Set(records.map(item => item.key));
+        for (const item of incoming) if (item?.key && !known.has(item.key)) records.push(item);
+        nextAfterCandidateKey = page?.nextAfterKey || null;
+      }
+      if (!append || nextAfterRecipeKey) {
+        const page = await bridge.data.scan({ collection: "knowledge", prefix: "tool-recipe:", limit: 100,
+          ...(append && nextAfterRecipeKey ? { afterKey: nextAfterRecipeKey } : {}) });
+        const incoming = Array.isArray(page?.items)
+          ? page.items.filter(item => normalizeToolRecipeRecord(item, { includeInactive: true })) : [];
+        const known = new Set(records.map(item => item.key));
+        for (const item of incoming) if (item?.key && !known.has(item.key)) records.push(item);
+        nextAfterRecipeKey = page?.nextAfterKey || null;
+      }
       loaded = true;
       setNotice(records.length
-        ? `已读取 ${records.length} 条候选流程。它们只能供 LLM 参考；实际操作仍限于上方已注册工具。${nextAfterKey ? " 可继续加载。" : ""}`
-        : "当前没有已保存的候选流程。");
+        ? `已读取 ${records.filter(item => item.value?.type === "tool-recipe").length} 条工具配方与 ${records.filter(item => item.value?.type === "tool-candidate").length} 条历史候选。配方由 LLM 按截图逐步判断；实际动作仍限于上方已注册工具。${nextAfterCandidateKey || nextAfterRecipeKey ? " 可继续加载。" : ""}`
+        : "当前没有已保存的工具配方或历史候选。");
       renderCandidates();
     } catch (error) {
-      setNotice("读取候选流程失败：" + String(error?.message || error).slice(0, 240), "error");
+      setNotice("读取工具条目失败：" + String(error?.message || error).slice(0, 240), "error");
     } finally {
       loading = false;
       if (refreshButton) refreshButton.disabled = !ready;
@@ -192,19 +279,24 @@ export function mountToolPanel({ root = globalThis.document, host = () => global
       const field = name => entry?.querySelector(`[data-tool-field="${name}"]`)?.value || "";
       let value;
       try {
-        value = prepareToolCandidateEdit(record.value, { name: field("name"), description: field("description"), toolRefs: field("toolRefs") });
+        value = record.value?.type === "tool-recipe"
+          ? prepareToolRecipeEdit(record.value, { name: field("name"), purpose: field("purpose"), applicability: field("applicability"), steps: field("steps") })
+          : prepareToolCandidateEdit(record.value, { name: field("name"), description: field("description"), toolRefs: field("toolRefs") });
       } catch (error) {
         setNotice(String(error?.message || error), "error");
         return;
       }
-      const saved = await saveRecord(record, value, "候选流程已修订。");
+      const saved = await saveRecord(record, value, record.value?.type === "tool-recipe" ? "工具配方已修订。" : "候选流程已修订。");
       if (saved) editingKey = "";
       renderCandidates();
       return;
     }
     if (command === "deactivate" || command === "activate") {
-      const state = command === "deactivate" ? "inactive" : "candidate";
-      await saveRecord(record, prepareToolCandidateState(record.value, state), state === "candidate" ? "候选流程已恢复推荐。" : "候选流程已停用。", true);
+      const state = command === "deactivate" ? "inactive" : (record.value?.type === "tool-recipe" ? "active" : "candidate");
+      const value = record.value?.type === "tool-recipe"
+        ? prepareToolRecipeState(record.value, state)
+        : prepareToolCandidateState(record.value, state);
+      await saveRecord(record, value, state === "active" || state === "candidate" ? "工具条目已恢复启用。" : "工具条目已停用。", true);
       return;
     }
     if (command === "confirm-delete") {
@@ -256,6 +348,10 @@ export function mountToolPanel({ root = globalThis.document, host = () => global
   candidates?.addEventListener("click", event => {
     const element = event.target?.closest?.("button[data-tool-action]");
     if (element && candidates.contains(element)) void handleAction(element);
+  });
+  recipes?.addEventListener("click", event => {
+    const element = event.target?.closest?.("button[data-tool-action]");
+    if (element && recipes.contains(element)) void handleAction(element);
   });
 
   return {

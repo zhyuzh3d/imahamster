@@ -109,12 +109,15 @@
         <h2 id="tool-title">Tool Engine · 工具库</h2>
         <button id="tool-refresh" class="button secondary memory-refresh" type="button" disabled>刷新</button>
       </div>
-      <p class="memory-description">上方注册工具是 Worker 可执行的有限动作原语；下方候选流程只作为历史参考，不能直接执行或扩大授权。</p>
+      <p class="memory-description">注册工具是有限动作原语。结构化配方按顺序提供参考步骤，由 LLM 根据每轮新截图判断是否适用并逐步调用；系统不执行脚本或盲目照做。旧候选仅供参考。</p>
       <details id="tool-details" class="memory-details">
-        <summary>查看可执行工具与候选流程</summary>
+        <summary>查看注册工具、可复用配方与历史候选</summary>
         <p class="tool-list-heading">已注册、可执行工具</p>
         <ul id="tool-registered-list" class="tool-registered-list"></ul>
-        <p id="tool-notice" class="memory-notice" role="status" aria-live="polite">展开后读取本机候选流程</p>
+        <p id="tool-notice" class="memory-notice" role="status" aria-live="polite">展开后读取本机工具条目</p>
+        <p class="tool-list-heading">结构化工具配方</p>
+        <div id="tool-recipe-list" class="tool-candidate-list"></div>
+        <p class="tool-list-heading">历史流程候选</p>
         <div id="tool-candidate-list" class="tool-candidate-list"></div>
         <button id="tool-load-more" class="button secondary memory-load-more" type="button" hidden>加载更多</button>
       </details>

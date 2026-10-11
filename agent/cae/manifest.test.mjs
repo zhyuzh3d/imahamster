@@ -16,6 +16,7 @@ test("CAE manifest records selected versions, bounded source refs, observation, 
     memoryLookupRefs: Array.from({ length: 9 }, (_, index) => `contact:${index}`),
     behaviorPatterns: Array.from({ length: 6 }, (_, index) => ({ sourceRef: `self-model:bp:${index}`, recordRevision: "9" })),
     toolCandidates: Array.from({ length: 4 }, (_, index) => ({ sourceRef: `knowledge:tool-candidate:${index}`, recordRevision: "10" })),
+    toolRecipes: Array.from({ length: 4 }, (_, index) => ({ sourceRef: `knowledge:tool-recipe:${index}`, recordRevision: "11" })),
   };
 
   const manifest = buildContextManifest(state, {
@@ -30,10 +31,11 @@ test("CAE manifest records selected versions, bounded source refs, observation, 
   assert.equal(manifest.selected.experiences.length, 5);
   assert.equal(manifest.selected.memories[0].revision, "2");
   assert.equal(manifest.selected.memories[0].recordRevision, "8");
+  assert.equal(manifest.selected.toolRecipes.length, 3);
   assert.deepEqual(manifest.selected.identityCore, { source: "user", version: 4 });
   assert.deepEqual(manifest.omitted, {
     history: 3, actionLoops: 2, experiences: 1, memories: 1,
-    memoryLookupRefs: 1, behaviorPatterns: 1, toolCandidates: 1,
+    memoryLookupRefs: 1, behaviorPatterns: 1, toolCandidates: 1, toolRecipes: 1,
   });
   assert.equal(manifest.contextCharacters, "short assembled context".length);
   assert.equal(manifest.approximateContextTokens, 6);

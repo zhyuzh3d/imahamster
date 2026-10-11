@@ -45,6 +45,15 @@ test("background goal persists progress and completes across screenshot cycles",
     type: "tool-candidate", state: "candidate", name: "天气查询候选",
     description: "打开天气页面并读取天气信息", toolRefs: ["interaction.capture"], createdAt: 70,
   } });
+  records.set("knowledge:tool-recipe:reply-context", { revision: "2", value: {
+    type: "tool-recipe", state: "active", name: "核对上下文后回复微信消息",
+    purpose: "确认当前会话，再根据上下文处理新消息", applicability: "指定联系人对话",
+    steps: [
+      { toolRef: "interaction.capture", purpose: "核对当前联系人和最新消息" },
+      { toolRef: "interaction.inputText", purpose: "仅在确认回复正文后输入" },
+      { toolRef: "interaction.capture", purpose: "发送前核对输入框内容和对象" },
+    ], createdAt: 65,
+  } });
   records.set("knowledge:memory:friend-xiaoming", { revision: "1", value: {
     id: "memory:friend-xiaoming", type: "memory", kind: "fact", state: "active",
     objectRefs: ["contact:小明"], content: "小明喜欢周末徒步", sourceRefs: ["trace:source"], observedAt: 80,
@@ -123,6 +132,9 @@ test("background goal persists progress and completes across screenshot cycles",
   assert.doesNotMatch(modelPrompts.at(-1), /天气摘要格式/);
   assert.match(modelPrompts.at(-1), /微信回复流程参考/);
   assert.doesNotMatch(modelPrompts.at(-1), /天气查询候选/);
+  assert.match(modelPrompts.at(-1), /核对上下文后回复微信消息/);
+  assert.match(modelPrompts.at(-1), /由你结合本轮截图逐步判断/);
+  assert.match(modelPrompts.at(-1), /interaction.inputText/);
   assert.match(modelPrompts.at(-1), /小明喜欢周末徒步/);
   assert.doesNotMatch(modelPrompts.at(-1), /小红/);
   assert.equal(records.get(`agent-runtime:${eventReceiptKey(submission.eventId)}`).value.state, "accepted");
@@ -383,6 +395,15 @@ test("LLM requests Persona and object Memory only when relevant and HO restores 
     type: "tool-candidate", state: "candidate", name: "查看会话再回复",
     description: "核对会话和最新上下文后回复朋友", toolRefs: ["interaction.capture", "interaction.input"], createdAt: 20,
   }, revision: "4" });
+  records.set("knowledge:tool-recipe:reply-flow", { value: {
+    type: "tool-recipe", state: "active", name: "回复朋友消息前核对会话",
+    purpose: "结合聊天上下文回复朋友消息", applicability: "明确指定联系人",
+    steps: [
+      { toolRef: "interaction.capture", purpose: "确认联系人会话和消息" },
+      { toolRef: "interaction.inputText", purpose: "输入已经核对的回复" },
+      { toolRef: "interaction.capture", purpose: "检查发送后的消息状态" },
+    ], createdAt: 25,
+  }, revision: "6" });
   records.set("self-model:bp:reply", { value: {
     type: "behavior-pattern", state: "active", scope: "global", title: "自然简洁回复",
     condition: "回复朋友消息", guidance: "自然直接，不复述对方整句", evidence: "已用于成功回复", createdAt: 20,
@@ -480,6 +501,7 @@ test("LLM requests Persona and object Memory only when relevant and HO restores 
   assert.deepEqual(manifest?.selected.experiences, [{ ref: "knowledge:experience:reply", revision: "1", recordRevision: "3" }]);
   assert.deepEqual(manifest?.selected.behaviorPatterns, [{ ref: "self-model:bp:reply", recordRevision: "5" }]);
   assert.deepEqual(manifest?.selected.toolCandidates, [{ ref: "knowledge:tool-candidate:reply-flow", recordRevision: "4" }]);
+  assert.deepEqual(manifest?.selected.toolRecipes, [{ ref: "knowledge:tool-recipe:reply-flow", recordRevision: "6" }]);
   assert.equal(saved.trace.some(event => event.phase === "context.requested" && event.includeIdentityCore), true);
   assert.equal(saved.trace.some(event => event.phase === "memory.context-loaded" && event.memoryCount === 1), true);
   assert.equal(saved.trace.some(event => event.phase === "identity-core.context-loaded" && event.version === 2), true);
@@ -1261,7 +1283,9 @@ test("screen effects persist a prepared receipt and require visual verification 
   let modelTurn = 0;
   let firstTapCallId = null;
   const decisions = [
-    { state: "action", confidence: 0.98, evidence: "合成页面显示唯一按钮", action: { type: "tap", target: "合成测试按钮", label: "Continue", x: 0.5, y: 0.5 } },
+    { state: "action", confidence: 0.98, evidence: "合成页面显示唯一按钮", recipeUse: {
+      sourceRef: "knowledge:tool-recipe:synthetic-tap", stepIndex: 0,
+    }, action: { type: "tap", target: "合成测试按钮", label: "Continue", x: 0.5, y: 0.5 } },
     { state: "done", confidence: 0.99, operationResult: "verified", evidence: "截图显示按钮后的完成标记" },
   ];
   const provider = { baseUrl: "https://model.example", apiKey: "x".repeat(24), model: "vision-model" };
@@ -1278,6 +1302,15 @@ test("screen effects persist a prepared receipt and require visual verification 
     }
     if (method === "data.put") return { revision: "1" };
     if (method === "data.get") return { value: params.key === "provider" ? provider : records.get(`${params.collection}:${params.key}`)?.value };
+    if (method === "data.scan" && params.prefix === "tool-recipe:") return { items: [{
+      key: "tool-recipe:synthetic-tap", revision: "5", value: {
+        type: "tool-recipe", state: "active", name: "合成页面点击后复核",
+        purpose: "按屏幕证据使用合成按钮", steps: [
+          { toolRef: "interaction.tap", purpose: "点击截图中唯一合成按钮" },
+          { toolRef: "interaction.capture", purpose: "观察点击后的界面" },
+        ],
+      },
+    }] };
     if (method === "data.scan") return { items: [] };
     if (method === "interaction.capture") return { mime: "image/jpeg", dataBase64: "c3ludGhldGljLWZyYW1l" };
     if (method === "network.request") return modelCall(params, () => decisions[modelTurn++]);
@@ -1313,6 +1346,11 @@ test("screen effects persist a prepared receipt and require visual verification 
   assert.ok(callOrder.indexOf("data.batch") < callOrder.indexOf("interaction.tap"));
   const active = records.get("agent-runtime:active-goal").value;
   assert.equal(active.state, "done");
+  const recipeDecision = active.trace.find(event => event.phase === "decision" && event.recipeUse);
+  assert.deepEqual(recipeDecision.recipeUse, {
+    sourceRef: "knowledge:tool-recipe:synthetic-tap", stepIndex: 0,
+    toolRef: "interaction.tap", recordRevision: "5",
+  });
   const phases = active.trace.map((event) => event.phase);
   for (const phase of ["screenshot.requested", "screenshot.received", "model.requested", "model.responded",
     "decision", "bridge.dispatched", "bridge.result"]) assert.ok(phases.includes(phase), `trace is missing ${phase}`);
@@ -2243,6 +2281,13 @@ test("LLM can start a new action loop after timeout and choose a reusable experi
         memories: [{ kind: "episode", objectRefs: ["contact:小明"], content: "小明提到下周想讨论旅行计划。", inference: "observed", tags: ["旅行"], sourceRefs: [memorySourceRef(active.goalId, memoryTrace)] }],
         saveTool: true,
         tool: { name: "页面入口复核", description: "观察页面后选择已注册的交互工具", toolRefs: ["interaction.tap", "shell.exec"] },
+        saveRecipe: true,
+        recipe: { name: "合成页面可见入口操作", purpose: "观察合成界面后按证据推进", applicability: "页面显示目标按钮且对象明确",
+          sourceRefs: [memorySourceRef(active.goalId, memoryTrace)], steps: [
+          { toolRef: "interaction.capture", purpose: "观察当前页面和目标对象" },
+          { toolRef: "interaction.tap", purpose: "只点击截图中确认的目标入口" },
+          { toolRef: "interaction.capture", purpose: "重新观察操作结果" },
+        ] },
       },
     });
     throw new Error(`Unexpected tool: ${method}`);
@@ -2265,6 +2310,12 @@ test("LLM can start a new action loop after timeout and choose a reusable experi
     createdAt: records.get(`self-model:bp:${active.goalId}`).value.createdAt,
   });
   assert.deepEqual(records.get(`knowledge:tool-candidate:${active.goalId}`).value.toolRefs, ["interaction.tap"]);
+  const savedRecipe = records.get(`knowledge:tool-recipe:${active.goalId}`).value;
+  assert.equal(savedRecipe.type, "tool-recipe");
+  assert.equal(savedRecipe.state, "active");
+  assert.equal(savedRecipe.sourceGoalId, active.goalId);
+  assert.deepEqual(savedRecipe.steps.map(step => step.toolRef), ["interaction.capture", "interaction.tap", "interaction.capture"]);
+  assert.deepEqual(savedRecipe.sourceRefs, [memorySourceRef(active.goalId, memoryTrace)]);
   const memory = records.get(`knowledge:memory:${active.goalId}:1`).value;
   assert.equal(memory.type, "memory");
   assert.equal(memory.objectRefs[0], "contact:小明");
@@ -2306,7 +2357,7 @@ test("the 30-minute deadline records an in-flight navigation receipt then stops 
   }
 
   let output = globalThis.onHaminnEvent({ type: "start" });
-  for (let turn = 0; output?.actions?.length && turn < 12; turn += 1) {
+  for (let turn = 0; output?.actions?.length && turn < 20; turn += 1) {
     const call = output.actions[0];
     output = globalThis.onHaminnEvent({ type: "tool.result", callId: call.callId, ok: true, result: tool(call.method, call.params) });
   }

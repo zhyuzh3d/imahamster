@@ -237,9 +237,9 @@ Memory 最小类别为 fact/episode/experience，联系人关系与自我叙事�
 
 内置工具描述与执行绑定统一注册，每项明确参数、权限、资源类型、外部效果与结果格式。CAE 取得有界工具摘要；TE 执行不反向调用 HO，资源申请由调用 HO 的边界完成。
 
-配方记录最少包含 `id, name, purpose, parameters, steps, applicability, sourceRefs, state, revision`。步骤只引用注册能力，视觉判断步骤显式交回 LLM。首版支持有界顺序组合，不支持任意 JS、无限递归或新的脚本解释器。
+配方记录最少包含 `name, purpose, applicability, sourceRefs, state, revision`；数据键提供稳定 ID。步骤为 2–8 个有序的 `{toolRef, purpose}`，且只引用当前注册能力。当前实现是 LLM 引导式配方：CAE 按相关性取最多三条，LLM 每轮根据新截图判断并给出动作参数；HO 只校验可选的 `recipeUse` 来源、步骤索引和动作工具是否相符，并记录使用归因，不代替 LLM 选择步骤、执行语义或判断结果。不保存坐标/动作参数，不引入脚本执行器、任意 JS、递归或额外 DSL。
 
-候选条目无法执行时保留 candidate，不对用户宣称工具已学会。可执行配方以结构校验和调用路径验证为门槛，语义适用性由 LLM 判断。收集实际执行来源与模型评价，版本错误可回退/停用。
+历史候选仍明确标为不可执行；结构化配方必须通过步骤与来源校验才会保存和参与检索。学习条目引用真实操作轨迹；用户可在工具页修订、停用、恢复或删除配方。配方进入 CAE 清单和 prompt，模型声明采用某一步时须与实际注册动作一致，过程日志据此保留版本和来源；语义适用性及任务结果仍由 LLM 判断。
 
 ### 6.5 完成后的学习
 
@@ -598,6 +598,13 @@ JS 测试适合纯状态与组装；QuickJS/Android 仪器测试负责真实模�
 - HO 已能把复杂 OST 拆分并逐项调度，但执行面板此前只显示原始目标、AL 与自由文本进度，用户看不到当前子 Task、完成数或正在进行的整体目标复核。
 - ui/worker-panel-state.mjs 现在从活动 OST 的持久 Task 图派生有界进度摘要，app.js 将其并入现有状态行；简单 OST 不增加多余内容。完成数直接来自 Task 状态，当前项来自 HO 调度 ID，最终复核明确显示为“整体目标复核”；若 task-done 已保存但 scheduler handoff 尚未完成，则显示等待调度，不误报当前子 Task 仍在执行。UI 不介入完成判断或状态写入。
 - 全量 node --test 130/130 通过，node --check app.js、面板模块语法检查和 git diff --check 通过。Haminn DEV revision 1227 先于本次 UI 改动；设备仍仅有模拟器可见，因此新摘要尚未在手机渲染验收。
+
+### 10.38 TE 结构化配方进入学习、检索与动作归因闭环（2026-10-11）
+
+- 原 TE 只有非执行候选；成功 OST 虽可保存候选说明，但下一 OST 无法得到有序、可校验的复用结构。本次新增 `agent/te/recipe.mjs` 与 `recipe-retrieval.mjs`：配方为 2–8 步的有序 `toolRef + purpose`，拒绝未注册能力、无效长度或缺少有效 sourceRefs 的建议；不保存代码、坐标或自动动作参数。
+- 成功后学习提示可提交配方和来源；Worker 仅接受本 OST 学习轨迹中的 sourceRef，独立保存 `tool-recipe:<ostId>`。后续 OST 先检索历史候选，再检索最多三条相关有效配方；CAE 将步骤、适用条件和 Bridge revision 交给 LLM。工具页增加配方的分页读取、修订、停用/恢复与删除。
+- LLM 可对单次动作附 `recipeUse`。HO 核实引用的配方当前存在、步骤索引有效且该步骤注册工具与动作类型一致，再把来源、修订和索引写入决策日志。此校验只保证引用与调用类型一致，不替 LLM 判断配方语义是否适用或任务是否成功。
+- 全量 `node --test` 133/133 通过，新增配方 schema、工具白名单、相关性检索、CAE 来源清单、学习保存与后续动作归因覆盖；`node --check`（Worker/CAE/UI/配方模块）与 `git diff --check` 通过。此时 `adb devices -l` 仍只显示 `emulator-5554`，Haminn DEV runtime 为 `not-visible`；本次只有本地自动化证据，工具页真机渲染、真实模型配方采用和微信结果尚未验收。
 
 ## 11. 交付与完成判定
 
