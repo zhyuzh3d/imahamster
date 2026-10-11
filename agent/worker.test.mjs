@@ -240,6 +240,7 @@ test("a recurring timer EDT persists each trigger as a separate OST and remains 
   const schedule = { kind: "interval", intervalMs: 60_000, firstAt: Date.now() + 60_000 };
   let captures = 0;
   let timerSchedules = 0;
+  let actionModelCalls = 0;
   const modelPrompts = [];
 
   function tool(method, params) {
@@ -287,7 +288,12 @@ test("a recurring timer EDT persists each trigger as a separate OST and remains 
       else if (prompt.includes("在本 AL 开始任何屏幕动作前")) {
         content = { estimatedMinutes: 2, budgetMinutes: 15, strategy: "观察当前页面后完成本次工作" };
       } else if (prompt.includes("判断是否值得保存经验")) content = { saveExperience: false, savePattern: false, saveTool: false };
-      else content = { state: "done", evidence: "本次计时触发的 OST 已完成" };
+      else {
+        actionModelCalls += 1;
+        content = actionModelCalls === 1
+          ? { state: "wait", evidence: "等待短暂变化后继续当前 OST", waitMs: 10_000 }
+          : { state: "done", evidence: "本次计时触发的 OST 已完成" };
+      }
       return { status: 200, bodyText: JSON.stringify({ choices: [{ message: { content: JSON.stringify(content) } }] }) };
     }
     if (method === "worker.wait") return { waitedMs: params.ms };
@@ -332,10 +338,33 @@ test("a recurring timer EDT persists each trigger as a separate OST and remains 
   assert.equal(deliver(timerEvent).duplicate, true);
   assert.equal(timerSchedules, 1);
 
-  assert.equal(deliver({ type: "event.acknowledged", eventId }).state, "done");
+  assert.equal(deliver({ type: "event.acknowledged", eventId }).state, "waiting");
+  const waitingOst = records.get("agent-runtime:active-goal").value;
+  assert.equal(waitingOst.sourceEventId, eventId);
+  assert.equal(waitingOst.waiting.automatic, true);
+
+  const scheduledAt2 = scheduledAt + schedule.intervalMs;
+  const eventId2 = `worker-timer:${eventTask.eventTaskId}:1:${scheduledAt2}`;
+  const timerEvent2 = { ...timerEvent, eventId: eventId2, scheduledAt: scheduledAt2,
+    occurredAt: scheduledAt2 + 2_000, missedCount: 0 };
+  assert.equal(deliver(timerEvent2).state, "waiting");
+  assert.equal(records.get("agent-runtime:active-goal").value.sourceEventId, eventId,
+    "a new trigger must not replace the OST that is already waiting");
+  assert.equal(records.get(`event-tasks:ed:${eventTask.eventTaskId}`).value.state, "active");
+  assert.ok(records.has(`inbox:${timerInboxKey(eventId2)}`), "the next timer trigger remains durably queued");
+
+  const resumed = deliver({ type: "tick" });
+  assert.equal(resumed.state, "event-start-pending");
+  const secondOst = records.get("agent-runtime:active-goal").value;
+  assert.equal(secondOst.sourceEventId, eventId2);
+  assert.notEqual(secondOst.goalId, firstOst.goalId);
+  assert.equal(records.get(`goals:g:${firstOst.goalId}`).value.state, "done");
+  assert.equal(records.get(`agent-runtime:${eventReceiptKey(eventId2)}`).value.state, "triggered");
+  assert.equal(records.has(`inbox:${timerInboxKey(eventId2)}`), false);
+  assert.equal(deliver({ type: "event.acknowledged", eventId: eventId2 }).state, "done");
   assert.ok(captures >= 1);
   assert.ok(Number.isFinite(hostDeadlines.find(Number.isFinite)), "the triggered OST receives its own deadline");
-  assert.equal(records.get("agent-runtime:active-goal").value.sourceEventId, eventId);
+  assert.equal(records.get("agent-runtime:active-goal").value.sourceEventId, eventId2);
   assert.equal(records.get(`event-tasks:ed:${eventTask.eventTaskId}`).value.state, "active",
     "completing one timer-triggered OST leaves the recurring EDT enabled");
 });
