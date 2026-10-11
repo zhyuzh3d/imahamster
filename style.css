@@ -61,6 +61,7 @@ h2 { margin: 0; font-size: 17px; }
 .worker-trace { max-height: 220px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--muted, #697586); font-size: 0.88rem; line-height: 1.55; }
 .worker-journal { margin-top: 8px; color: var(--muted); font-size: 12px; line-height: 1.5; }
 .worker-journal summary { cursor: pointer; }
+.worker-journal-refresh { min-height: 32px; margin-top: 8px; padding: 0 10px; font-size: 11px; }
 .worker-journal-events { max-height: 360px; overflow: auto; padding: 10px; border-radius: 10px; background: var(--surface, #fff); white-space: pre-wrap; overflow-wrap: anywhere; font: 11px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; }
 .worker-reply { width: 100%; box-sizing: border-box; margin: 8px 0; padding: 10px; border: 1px solid var(--border, #d8deea); border-radius: 10px; background: var(--surface, #fff); color: inherit; font: inherit; resize: vertical; }
 .worker-progress { margin: 12px 0 0; color: var(--muted); font-size: 12px; line-height: 1.55; overflow-wrap: anywhere; }

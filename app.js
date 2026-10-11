@@ -10,8 +10,6 @@
   const workerProgressLine = $("#worker-progress");
   const workerEventTasks = $("#worker-event-tasks");
   const workerTraceLine = $("#worker-trace");
-  const workerJournalDetails = $("#worker-journal-details");
-  const workerJournalEvents = $("#worker-journal-events");
   const workerReplyInput = $("#worker-reply");
   const workerPauseButton = $("#worker-pause");
   const workerResumeButton = $("#worker-resume");
@@ -40,12 +38,12 @@
   let lastResult = null;
   let activeTrace = null;
   let workerJournalGoalId = "";
-  let workerJournalLoading = false;
   let submissionDeadlineAt = 0;
   let workerControlBusy = false;
   let hoControlModule = null;
   let selfModelPanelController = null;
   let toolPanelController = null;
+  let workerJournalController = null;
 
 
 
@@ -795,11 +793,7 @@
     const goalId = String(active?.goalId || "");
     if (goalId !== workerJournalGoalId) {
       workerJournalGoalId = goalId;
-      if (workerJournalDetails) {
-        workerJournalDetails.open = false;
-        workerJournalDetails.hidden = !goalId;
-      }
-      if (workerJournalEvents) workerJournalEvents.textContent = "展开后读取事件记录";
+      workerJournalController?.setGoalId(goalId);
     }
     const acceptedAt = Number(lastResult?.acceptedAt || 0);
     const persistedCurrentGoal = !!active && active.intent === lastResult?.goalIntent &&
@@ -943,41 +937,6 @@
     return { active, queuedCount: Array.isArray(queue?.items) ? queue.items.length : 0,
       eventTasks: Array.isArray(eventTasks?.items) ? eventTasks.items : [],
       serviceState: service?.state || "stopped", serviceError: service?.error || "" };
-  }
-
-  async function loadWorkerJournal() {
-    const goalId = workerJournalGoalId;
-    if (!goalId || workerJournalLoading || !window.haminn?.isReady || !workerJournalEvents) return;
-    workerJournalLoading = true;
-    workerJournalEvents.textContent = "正在读取后台事件记录…";
-    try {
-      let afterKey;
-      let pages = 0;
-      let records = [];
-      do {
-        const page = await haminn.data.scan({ collection: "agent-events", prefix: `e:${goalId}:`, limit: 100,
-          ...(afterKey ? { afterKey } : {}) });
-        const items = Array.isArray(page?.items) ? page.items : [];
-        records.push(...items);
-        if (records.length > 500) records = records.slice(-500);
-        afterKey = page?.nextAfterKey || null;
-        pages += 1;
-      } while (afterKey && pages < 10);
-      if (goalId !== workerJournalGoalId) return;
-      const lines = records.map(({ value = {} }) => {
-        const at = Number(value.at);
-        const time = Number.isFinite(at) ? new Date(at).toLocaleTimeString() : "--:--:--";
-        const serialized = JSON.stringify(value);
-        const detail = serialized.length > 1200 ? `${serialized.slice(0, 1200)}…[详情截断]` : serialized;
-        return `${time} #${value.step || 0} ${value.phase || "event"} ${detail}`;
-      });
-      const notice = afterKey ? "达到单次读取上限；以下为已读取事件中的最后 500 条。" : `共 ${records.length} 条事件。`;
-      workerJournalEvents.textContent = lines.length ? `${notice}\n${lines.join("\n")}` : "该 OST 尚无事件记录。";
-    } catch (error) {
-      workerJournalEvents.textContent = `事件记录读取失败：${String(error?.message || error).slice(0, 300)}`;
-    } finally {
-      workerJournalLoading = false;
-    }
   }
 
   async function refreshWorkerPanel() {
@@ -1325,9 +1284,6 @@
   }
 
   setupButton.addEventListener("click", continueSetup);
-  workerJournalDetails?.addEventListener("toggle", () => {
-    if (workerJournalDetails.open) void loadWorkerJournal();
-  });
   workerPauseButton?.addEventListener("click", () => controlWorker("pause"));
   workerResumeButton?.addEventListener("click", () => controlWorker("resume"));
   workerCancelButton?.addEventListener("click", () => controlWorker("cancel"));
@@ -1369,6 +1325,15 @@
     if (ready) setMessage("工具库管理界面无法加载：" + String(error?.message || error).slice(0, 180), "error");
   });
 
+  void import("./ui/worker-journal.mjs").then(({ mountWorkerJournal }) => {
+    workerJournalController = mountWorkerJournal();
+    workerJournalController.setGoalId(workerJournalGoalId);
+    workerJournalController.setReady(ready && window.haminn?.isReady === true);
+  }).catch(error => {
+    console.error("ImHamster worker journal failed to load", error);
+    if (ready) setMessage("后台过程记录界面无法加载：" + String(error?.message || error).slice(0, 180), "error");
+  });
+
   window.addEventListener("pagehide", () => {
     if (!operationRunning || backgroundHandedOff) return;
     const stepCount = activeTrace?.events.filter((event) => event.phase === "step-start").length || 0;
@@ -1389,6 +1354,7 @@
     ready = true;
     selfModelPanelController?.setReady(window.haminn?.isReady === true);
     toolPanelController?.setReady(window.haminn?.isReady === true);
+    workerJournalController?.setReady(window.haminn?.isReady === true);
     try {
       const consentRecord = await haminn.data.get({ collection: "screen-interaction", key: "consent-v2" });
       consent.checked = consentRecord?.value === true;
