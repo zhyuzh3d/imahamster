@@ -16,6 +16,11 @@
   const workerPauseButton = $("#worker-pause");
   const workerResumeButton = $("#worker-resume");
   const workerCancelButton = $("#worker-cancel");
+  const memoryDetails = $("#memory-details");
+  const memoryNotice = $("#memory-notice");
+  const memoryList = $("#memory-list");
+  const memoryRefreshButton = $("#memory-refresh");
+  const memoryLoadMoreButton = $("#memory-load-more");
   const API_UA = "Mozilla/5.0 (Linux; Android 15; CMA-AN00) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Mobile Safari/537.36";
   const BASE_BUBBLE_COLOR = "#4c7dff";
   const MAX_TASK_STEPS = 4096;
@@ -44,6 +49,12 @@
   let submissionDeadlineAt = 0;
   let workerControlBusy = false;
   let hoControlModule = null;
+  let memoryRecords = [];
+  let memoryNextAfterKey = null;
+  let memoryLoading = false;
+  let memoryLoaded = false;
+  let memoryEditingKey = "";
+  let memoryDeleteConfirmKey = "";
 
 
 
@@ -943,6 +954,192 @@
       serviceState: service?.state || "stopped", serviceError: service?.error || "" };
   }
 
+  function setMemoryNotice(text, tone = "") {
+    if (!memoryNotice) return;
+    memoryNotice.textContent = text;
+    memoryNotice.dataset.tone = tone;
+  }
+
+  function memoryButton(label, action, key, className = "button secondary") {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = className;
+    button.textContent = label;
+    button.dataset.memoryAction = action;
+    button.dataset.memoryKey = key;
+    button.disabled = memoryLoading;
+    return button;
+  }
+
+  function renderMemoryList() {
+    if (!memoryList) return;
+    memoryList.replaceChildren();
+    for (const record of memoryRecords) {
+      const value = record?.value;
+      if (!record?.key || value?.type !== "memory") continue;
+      const entry = document.createElement("article");
+      entry.className = "memory-entry";
+      const title = document.createElement("p");
+      title.className = "memory-entry-title";
+      title.textContent = (Array.isArray(value.objectRefs) ? value.objectRefs : []).join("、") || "未标注对象";
+      entry.append(title);
+      const meta = document.createElement("p");
+      meta.className = "memory-entry-meta";
+      const kind = value.kind === "episode" ? "经历" : "事实";
+      const inference = value.inference === "inferred" ? "推断" : "观察记录";
+      const observedAt = Number(value.observedAt);
+      const date = Number.isFinite(observedAt) && observedAt > 0 ? new Date(observedAt).toLocaleString() : "时间未知";
+      meta.textContent = kind + " · " + inference + " · 来源 " + (Array.isArray(value.sourceRefs) ? value.sourceRefs.length : 0) + " 条 · " + date;
+      entry.append(meta);
+
+      if (memoryEditingKey === record.key) {
+        const content = document.createElement("textarea");
+        content.className = "memory-entry-editor";
+        content.maxLength = 800;
+        content.dataset.memoryContent = "true";
+        content.setAttribute("aria-label", "记忆内容");
+        content.value = String(value.content || "");
+        const objects = document.createElement("input");
+        objects.className = "memory-entry-objects";
+        objects.type = "text";
+        objects.maxLength = 1000;
+        objects.dataset.memoryObjects = "true";
+        objects.setAttribute("aria-label", "对象范围，使用逗号分隔");
+        objects.value = (Array.isArray(value.objectRefs) ? value.objectRefs : []).join(", ");
+        const fields = document.createElement("div");
+        fields.append(content, objects);
+        const actions = document.createElement("div");
+        actions.className = "memory-entry-actions";
+        actions.append(memoryButton("保存修订", "save", record.key), memoryButton("取消", "cancel-edit", record.key));
+        entry.append(fields, actions);
+      } else {
+        const content = document.createElement("p");
+        content.className = "memory-entry-content";
+        content.textContent = String(value.content || "");
+        entry.append(content);
+        const actions = document.createElement("div");
+        actions.className = "memory-entry-actions";
+        actions.append(memoryButton("修订", "edit", record.key), memoryButton("删除", "delete", record.key, "button danger"));
+        if (memoryDeleteConfirmKey === record.key) {
+          actions.append(memoryButton("确认删除", "confirm-delete", record.key, "button danger"), memoryButton("取消", "cancel-delete", record.key));
+        }
+        entry.append(actions);
+      }
+      memoryList.append(entry);
+    }
+    if (memoryLoadMoreButton) {
+      memoryLoadMoreButton.hidden = !memoryNextAfterKey;
+      memoryLoadMoreButton.disabled = memoryLoading;
+    }
+  }
+
+  async function loadMemoryPage({ append = false } = {}) {
+    if (!window.haminn?.isReady || memoryLoading) return;
+    if (!append) {
+      memoryRecords = [];
+      memoryNextAfterKey = null;
+      memoryLoaded = false;
+      memoryEditingKey = "";
+      memoryDeleteConfirmKey = "";
+      if (memoryList) memoryList.replaceChildren();
+    }
+    memoryLoading = true;
+    if (memoryRefreshButton) memoryRefreshButton.disabled = true;
+    if (memoryLoadMoreButton) memoryLoadMoreButton.disabled = true;
+    setMemoryNotice(append ? "正在读取更多记忆…" : "正在读取本机记忆…");
+    try {
+      const page = await haminn.data.scan({ collection: "knowledge", prefix: "memory:", limit: 100,
+        ...(append && memoryNextAfterKey ? { afterKey: memoryNextAfterKey } : {}) });
+      const incoming = Array.isArray(page?.items) ? page.items.filter(item => item?.value?.type === "memory") : [];
+      const known = new Set(memoryRecords.map(item => item.key));
+      for (const item of incoming) if (item?.key && !known.has(item.key)) memoryRecords.push(item);
+      memoryNextAfterKey = page?.nextAfterKey || null;
+      memoryLoaded = true;
+      const tail = memoryNextAfterKey ? "；可继续加载" : "";
+      setMemoryNotice(memoryRecords.length ? "已读取 " + memoryRecords.length + " 条记忆" + tail + "。" : "当前没有已保存的记忆。");
+      renderMemoryList();
+    } catch (error) {
+      setMemoryNotice("读取记忆失败：" + String(error?.message || error).slice(0, 240), "error");
+    } finally {
+      memoryLoading = false;
+      if (memoryRefreshButton) memoryRefreshButton.disabled = !ready;
+      renderMemoryList();
+    }
+  }
+
+  async function handleMemoryAction(button) {
+    if (!window.haminn?.isReady || memoryLoading) return;
+    const key = button.dataset.memoryKey || "";
+    const action = button.dataset.memoryAction || "";
+    const record = memoryRecords.find(item => item.key === key);
+    if (!record) return;
+    if (action === "edit") {
+      memoryEditingKey = key;
+      memoryDeleteConfirmKey = "";
+      renderMemoryList();
+      return;
+    }
+    if (action === "cancel-edit") {
+      memoryEditingKey = "";
+      renderMemoryList();
+      return;
+    }
+    if (action === "delete") {
+      memoryDeleteConfirmKey = key;
+      memoryEditingKey = "";
+      renderMemoryList();
+      return;
+    }
+    if (action === "cancel-delete") {
+      memoryDeleteConfirmKey = "";
+      renderMemoryList();
+      return;
+    }
+    if (action === "save") {
+      const entry = button.closest(".memory-entry");
+      const content = entry?.querySelector("[data-memory-content]")?.value?.trim() || "";
+      const rawRefs = entry?.querySelector("[data-memory-objects]")?.value || "";
+      const objectRefs = [...new Set(rawRefs.split(/[,，\n]/).map(value => value.trim()).filter(Boolean))];
+      if (!content || content.length > 800 || !objectRefs.length || objectRefs.length > 8 || objectRefs.some(value => value.length > 120)) {
+        setMemoryNotice("请填写 1–800 字记忆内容，并设置 1–8 个不超过 120 字的对象范围。", "error");
+        return;
+      }
+      memoryLoading = true;
+      renderMemoryList();
+      try {
+        const value = { ...record.value, content, objectRefs, revision: Math.max(1, Number(record.value.revision) || 1) + 1, updatedAt: Date.now() };
+        const updated = await haminn.data.put({ collection: "knowledge", key, value, expectedRevision: record.revision });
+        record.value = value;
+        record.revision = updated?.revision || record.revision;
+        memoryEditingKey = "";
+        setMemoryNotice("记忆已修订并保存。", "success");
+      } catch (error) {
+        setMemoryNotice("保存失败；记录可能已在其他位置更新，请刷新后重试。 " + String(error?.message || error).slice(0, 180), "error");
+      } finally {
+        memoryLoading = false;
+        if (memoryRefreshButton) memoryRefreshButton.disabled = !ready;
+        renderMemoryList();
+      }
+      return;
+    }
+    if (action === "confirm-delete") {
+      memoryLoading = true;
+      renderMemoryList();
+      try {
+        await haminn.data.delete({ collection: "knowledge", key, expectedRevision: record.revision });
+        memoryRecords = memoryRecords.filter(item => item.key !== key);
+        memoryDeleteConfirmKey = "";
+        setMemoryNotice("记忆已删除。", "success");
+      } catch (error) {
+        setMemoryNotice("删除失败；记录可能已在其他位置更新，请刷新后重试。 " + String(error?.message || error).slice(0, 180), "error");
+      } finally {
+        memoryLoading = false;
+        if (memoryRefreshButton) memoryRefreshButton.disabled = !ready;
+        renderMemoryList();
+      }
+    }
+  }
+
   async function loadWorkerJournal() {
     const goalId = workerJournalGoalId;
     if (!goalId || workerJournalLoading || !window.haminn?.isReady || !workerJournalEvents) return;
@@ -1351,6 +1548,16 @@
 
   window.haminn?.on("overlay.clicked", runFromOverlay);
 
+  memoryDetails?.addEventListener("toggle", () => {
+    if (memoryDetails.open && !memoryLoaded) void loadMemoryPage();
+  });
+  memoryRefreshButton?.addEventListener("click", () => { void loadMemoryPage(); });
+  memoryLoadMoreButton?.addEventListener("click", () => { void loadMemoryPage({ append: true }); });
+  memoryList?.addEventListener("click", event => {
+    const button = event.target?.closest?.("button[data-memory-action]");
+    if (button) void handleMemoryAction(button);
+  });
+
   window.addEventListener("pagehide", () => {
     if (!operationRunning || backgroundHandedOff) return;
     const stepCount = activeTrace?.events.filter((event) => event.phase === "step-start").length || 0;
@@ -1369,6 +1576,7 @@
   async function onReady() {
     if (ready) return;
     ready = true;
+    if (memoryRefreshButton) memoryRefreshButton.disabled = false;
     try {
       const consentRecord = await haminn.data.get({ collection: "screen-interaction", key: "consent-v2" });
       consent.checked = consentRecord?.value === true;

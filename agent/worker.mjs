@@ -4,6 +4,7 @@ import { buildChatCompletionRequest, classifyProviderStatus, DEFAULT_PROVIDER_TI
 import { buildActionContext } from "./cae/context.mjs";
 import { SYSTEM_PROMPT } from "./cae/prompts.mjs";
 import { retrieveRelevantExperiences } from "./me/retrieval.mjs";
+import { memorySourceRef, normalizeMemorySuggestion, retrieveMemoriesForObjects, retrieveRelevantMemories } from "./me/memory.mjs";
 import { normalizeBehaviorPattern, retrieveBehaviorPatterns } from "./sm/behavior-patterns.mjs";
 import { isRegisteredTool } from "./te/catalog.mjs";
 import { retrieveRelevantToolCandidates } from "./te/retrieval.mjs";
@@ -114,6 +115,7 @@ function applyProviderText(purpose, text) {
         });
         return beginActionLoopReviewCapture();
       }
+      if (decision.state === "context") return requestMemoryContext(decision);
       return persistDecision(decision);
     }
     case "al-plan": return saveActionLoopPlan(text);
@@ -366,6 +368,7 @@ function requestActionLoopReview(frame) {
     { role: "system", content: SYSTEM_PROMPT },
     { role: "user", content: [
       { type: "text", text: `${contextText()}\n本 AL 已到预算检查点。超时不是失败，也不结束当前 OST。请结合最新截图、已执行步骤、重复/无进展情况，选择：continue（增加当前 AL 时间并继续；续时后本 AL 总预算不得超过 30 分钟）、new-action-loop（结束本 AL，保存现场，先估算再以新 AL 继续同一个 OST）、restart（忽略旧的执行上下文，以新 AL 从当前可见现场重新开始这个 OST）。所有选择仍受同一 OST 的 30 分钟总时限约束。你自行权衡任何未核实外部操作的影响并作出选择；系统会保留未决操作记录供你判断，不替你选择路线。必须选择能推进目标的策略。只返回 JSON：{"choice":"continue|new-action-loop|restart","additionalMinutes":5,"reason":"...","nextStrategy":"..."}` },
+      { type: "text", text: `补充的上下文请求格式：如果当前截图显示了具体联系人/对象，而且这项沟通明显需要其历史信息、当前上下文没有对应记忆，先只返回 JSON {"state":"context","evidence":"截图可见对象及请求原因","contextRequest":{"memoryObjectRefs":["contact:截图中准确名称"]}}；不要同时给动作或猜测对象名称。最多请求 8 个准确 objectRef；已查询过的范围不要重复请求。若无法确认对象或不需要对象记忆，按原动作格式继续。` },
       { type: "image_url", image_url: { url: `data:${frame.mime || "image/jpeg"};base64,${frame.dataBase64}` } },
     ] },
   ];
@@ -925,12 +928,22 @@ function parseDecision(text) {
   const end = cleaned.lastIndexOf("}");
   if (start < 0 || end <= start) throw new Error("模型没有返回 JSON 决策");
   const decision = JSON.parse(cleaned.slice(start, end + 1));
-  if (!decision || !["action", "wait", "ask", "done", "stop"].includes(decision.state) ||
+  if (!decision || !["action", "context", "wait", "ask", "done", "stop"].includes(decision.state) ||
       typeof decision.evidence !== "string" || !decision.evidence.trim() || decision.evidence.length > 360) {
     throw new Error("模型决策缺少有效状态或截图证据");
   }
   if (state?.pendingOperationId && !["verified", "not-executed", "unknown"].includes(decision.operationResult)) {
     throw new Error("模型需要记录自己对上一步操作结果的判断");
+  }
+  if (decision.state === "context") {
+    const rawRefs = decision.contextRequest?.memoryObjectRefs;
+    if (!Array.isArray(rawRefs) || rawRefs.length < 1 || rawRefs.length > 8 ||
+        rawRefs.some(value => typeof value !== "string" || !value.trim() || value.trim().length > 120)) {
+      throw new Error("对象记忆请求必须包含 1 到 8 个有效 objectRef");
+    }
+    decision.contextRequest = { memoryObjectRefs: [...new Set(rawRefs.map(value => value.trim()))] };
+  } else if (decision.contextRequest !== undefined) {
+    throw new Error("只有 context 决策可以请求补充记忆");
   }
   if (decision.state === "action") {
     validateScreenAction(decision.action);
@@ -943,6 +956,52 @@ function parseDecision(text) {
   if (decision.state === "ask" && (typeof decision.question !== "string" || !decision.question.trim())) throw new Error("澄清问题无效");
   if (decision.state === "stop" && (typeof decision.reason !== "string" || !decision.reason.trim())) throw new Error("停止原因缺失");
   return decision;
+}
+
+function settleContextOperation(decision, operations) {
+  if (!state.pendingOperationId) return;
+  const operation = applyCurrentOperationOutcome(state, decision.operationResult, decision.evidence, Date.now());
+  state.lastOperationResult = decision.operationResult;
+  if (operation) operations.push(record("operations", `o:${operation.operationId}`, operation));
+}
+
+function requestMemoryContext(decision) {
+  const requestedRefs = decision.contextRequest.memoryObjectRefs;
+  const previouslyQueried = new Set(Array.isArray(state.memoryLookupRefs) ? state.memoryLookupRefs : []);
+  const available = Math.max(0, 8 - previouslyQueried.size);
+  const newRefs = requestedRefs.filter(ref => !previouslyQueried.has(ref)).slice(0, available);
+  const operations = [];
+  settleContextOperation(decision, operations);
+
+  state.revision = Number(state.revision || 0) + 1;
+  if (!newRefs.length) {
+    state.memoryLookupNotice = "这些对象记忆范围已查询过，或本次 OST 已达到 8 个不同对象范围的查询上限；请依据当前可见证据继续。";
+    appendTrace("memory.context-query-limited", { requestedCount: requestedRefs.length, searchedCount: previouslyQueried.size });
+    operations.push(...updateGoalAndTask(decision));
+    pending = "memory-context-repeat-saved";
+    return action("data.batch", { operations });
+  }
+
+  state.memoryLookupRefs = [...previouslyQueried, ...newRefs];
+  state.pendingMemoryRequest = { objectRefs: newRefs, requestedAt: Date.now() };
+  state.memoryLookupNotice = "正在按截图中识别的对象查找相关记忆。";
+  appendTrace("memory.context-requested", { objectCount: newRefs.length, evidence: decision.evidence });
+  operations.push(...updateGoalAndTask(decision));
+  pending = "memory-context-request-saved";
+  return action("data.batch", { operations });
+}
+
+function finishMemoryContextScan(items) {
+  const request = state.pendingMemoryRequest;
+  const requestedRefs = Array.isArray(request?.objectRefs) ? request.objectRefs : [];
+  const matches = retrieveMemoriesForObjects(requestedRefs, Array.isArray(items) ? items : [], { limit: 5 });
+  const merged = new Map((Array.isArray(state.memories) ? state.memories : []).map(item => [item.id, item]));
+  for (const item of matches) merged.set(item.id, item);
+  state.memories = [...merged.values()].slice(-5);
+  state.pendingMemoryRequest = null;
+  state.memoryLookupNotice = `对象记忆检索已完成：查询 ${requestedRefs.length} 个范围，找到 ${matches.length} 条相关记忆。`;
+  appendTrace("memory.context-loaded", { requestedCount: requestedRefs.length, memoryCount: matches.length });
+  return persist("memory-context-result-saved");
 }
 
 function parseJsonObject(text, purpose) {
@@ -1131,12 +1190,32 @@ function applyActionLoopReview(text) {
 }
 
 function requestLearningReview() {
-  const history = (state.trace || []).filter(event => ["action-loop.started", "action-loop.review", "decision", "bridge.result", "recovery.scheduled"].includes(event.phase)).slice(-24);
+  const history = learningHistory();
   const messages = [
-    { role: "system", content: "你负责从已成功完成的手机任务中提炼可复用经验、行为偏好或工具流程候选。只保留有证据、可迁移的内容；不得保存个人消息正文、朋友身份和隐私事实、密钥或截图隐私。行为模式必须是有证据的通用偏好，不能形成新的任务授权或越权指令。工具只能引用系统已注册的工具名，禁止生成代码或可执行脚本。没有值得复用的内容时不保存。严格返回 JSON。" },
-    { role: "user", content: `任务目标：${state.intent}\n成功结果：${state.progress}\n执行轨迹摘要：${JSON.stringify(history)}\n判断是否值得保存经验、通用行为模式，或保存一个仅由已注册工具组成的流程候选。JSON 格式：{"saveExperience":false,"experience":{"title":"","situation":"","approach":"","successEvidence":"","toolRefs":[]},"savePattern":false,"pattern":{"title":"","condition":"","guidance":"","evidence":""},"saveTool":false,"tool":{"name":"","description":"","toolRefs":[]}}` },
+    { role: "system", content: "你负责从已成功完成的手机任务中提炼可复用经验、行为偏好、对象记忆或工具流程候选。只依据提供的目标、结果和操作轨迹，不补造轨迹未支持的事实；没有值得复用的内容就不保存。Memory 只保存简短且对相关后续任务有用的事实或事件摘要；可按可见对象使用稳定 objectRef（如 contact:显示名称），清楚区分 observed 与 inferred，并只引用给出的 sourceRef。不得复制整段聊天；不得保存密码、密钥、认证信息或与任务无关的敏感细节。行为模式只能描述助手自身有证据的通用偏好，不能形成新的任务授权或越权指令。工具候选只能引用系统已注册的工具名，禁止生成代码或可执行脚本。严格返回 JSON。" },
+    { role: "user", content: `任务目标：${state.intent}\n成功结果：${state.progress}\n执行轨迹摘要（sourceRef 是唯一允许引用的记忆来源）：${JSON.stringify(history)}\n判断是否值得保存经验、通用行为模式、对象 Memory，或保存一个仅由已注册工具组成的流程候选。Memory 最多 3 条，每条 kind 为 fact/episode、inference 为 observed/inferred，必须指定 objectRefs、content、tags 和至少一个 sourceRefs。JSON 格式：{"saveExperience":false,"experience":{"title":"","situation":"","approach":"","successEvidence":"","toolRefs":[]},"savePattern":false,"pattern":{"title":"","condition":"","guidance":"","evidence":""},"saveMemory":false,"memories":[{"kind":"fact","objectRefs":[],"content":"","inference":"observed","tags":[],"sourceRefs":[]}],"saveTool":false,"tool":{"name":"","description":"","toolRefs":[]}}` },
   ];
   return requestProvider("learning", "learning.model-requested", {}, messages);
+}
+
+function learningHistory() {
+  return (state.trace || [])
+    .filter(event => ["action-loop.started", "action-loop.review", "decision", "bridge.result", "recovery.scheduled"].includes(event.phase))
+    .slice(-24)
+    .map(event => ({
+      sourceRef: memorySourceRef(state.goalId, event),
+      at: event.at,
+      step: event.step,
+      phase: event.phase,
+      ...(event.decision ? { decision: event.decision } : {}),
+      ...(event.actionType ? { actionType: event.actionType, target: event.target, label: event.label } : {}),
+      ...(event.evidence ? { evidence: String(event.evidence).slice(0, 240) } : {}),
+      ...(event.message ? { issue: String(event.message).slice(0, 180) } : {}),
+      ...(event.code ? { code: String(event.code).slice(0, 48) } : {}),
+      ...(event.choice ? { choice: event.choice } : {}),
+      ...(event.mode ? { recovery: event.mode } : {}),
+      ...(event.operationResult ? { operationResult: event.operationResult } : {}),
+    }));
 }
 
 function saveLearningSuggestion(suggestion) {
@@ -1154,6 +1233,17 @@ function saveLearningSuggestion(suggestion) {
         const value = { schemaVersion: 1, type: "experience", state: "active", title: item.title.trim(), situation: item.situation.trim(), approach: item.approach.trim(), successEvidence: item.successEvidence.trim(), toolRefs: toolRefs(item.toolRefs), sourceGoalId: state.goalId, createdAt: Date.now() };
         operations.push(record("knowledge", `experience:${state.goalId}`, value));
       }
+    }
+    if (suggestion.saveMemory === true && Array.isArray(suggestion.memories) && state.progress) {
+      const history = learningHistory();
+      const sourceTimes = Object.fromEntries(history.map(item => [item.sourceRef, Number(item.at) || 0]));
+      const allowedSourceRefs = new Set(Object.keys(sourceTimes).filter(Boolean));
+      suggestion.memories.slice(0, 3).forEach((item, index) => {
+        const value = normalizeMemorySuggestion(item, { goalId: state.goalId, allowedSourceRefs, sourceTimes, at: Date.now() });
+        if (!value) return;
+        value.id = `memory:${state.goalId}:${index + 1}`;
+        operations.push(record("knowledge", value.id, value));
+      });
     }
     if (suggestion.saveTool === true && suggestion.tool && state.progress) {
       const item = suggestion.tool;
@@ -1633,6 +1723,14 @@ function advanceAfterTool(event) {
     }
     case "knowledge-scan": {
       state.experiences = retrieveRelevantExperiences(state.intent, result?.items || [], { limit: 5 });
+      pending = "memory-scan";
+      return action("data.scan", { collection: "knowledge", prefix: "memory:", limit: 100 });
+    }
+    case "memory-scan": {
+      state.memories = retrieveRelevantMemories(state.intent, result?.items || [], { limit: 5 });
+      state.memoryLookupRefs = [...new Set([...(Array.isArray(state.memoryLookupRefs) ? state.memoryLookupRefs : []),
+        ...state.memories.flatMap(item => item.objectRefs || [])])].slice(0, 8);
+      if (state.pendingMemoryRequest?.objectRefs?.length) return finishMemoryContextScan(result?.items || []);
       pending = "behavior-pattern-scan";
       return action("data.scan", { collection: "self-model", prefix: "bp:", limit: 100 });
     }
@@ -1651,6 +1749,12 @@ function advanceAfterTool(event) {
       if (receiptRecovery) return receiptRecovery;
       return beginObserve();
     }
+    case "memory-context-request-saved": {
+      pending = "memory-context-scan";
+      return action("data.scan", { collection: "knowledge", prefix: "memory:", limit: 100 });
+    }
+    case "memory-context-scan": return finishMemoryContextScan(result?.items || []);
+    case "memory-context-result-saved": case "memory-context-repeat-saved": return beginObserve();
     case "loop-review-capture": {
       if (!result?.dataBase64 || result.dataBase64.length > 600_000) throw new Error("超时复盘截图为空或超出后台事件限制");
       return requestActionLoopReview(result);

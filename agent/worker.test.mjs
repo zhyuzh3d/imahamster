@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { eventReceiptKey } from "./ho/events.mjs";
 import { notificationInboxKey, timerInboxKey } from "./ho/edts.mjs";
+import { memorySourceRef } from "./me/memory.mjs";
 import "./worker.mjs";
 
 function modelCall(params, decide, options = {}) {
@@ -43,6 +44,16 @@ test("background goal persists progress and completes across screenshot cycles",
   records.set("knowledge:tool-candidate:weather", { revision: "1", value: {
     type: "tool-candidate", state: "candidate", name: "天气查询候选",
     description: "打开天气页面并读取天气信息", toolRefs: ["interaction.capture"], createdAt: 70,
+  } });
+  records.set("knowledge:memory:friend-xiaoming", { revision: "1", value: {
+    id: "memory:friend-xiaoming", type: "memory", kind: "fact", state: "active",
+    objectRefs: ["contact:小明"], content: "小明喜欢周末徒步", sourceRefs: ["trace:source"], observedAt: 80,
+    inference: "observed", tags: ["徒步"], revision: 2,
+  } });
+  records.set("knowledge:memory:friend-xiaohong", { revision: "1", value: {
+    id: "memory:friend-xiaohong", type: "memory", kind: "fact", state: "active",
+    objectRefs: ["contact:小红"], content: "新消息需要及时回复", sourceRefs: ["trace:source-2"], observedAt: 90,
+    inference: "inferred", tags: ["消息"], revision: 1,
   } });
 
   function tool(method, params) {
@@ -101,7 +112,7 @@ test("background goal persists progress and completes across screenshot cycles",
     return output;
   }
 
-  const submission = { type: "goal.submit", intent: "持续检查新消息并根据上下文处理", eventId: "goal-submit-once" };
+  const submission = { type: "goal.submit", intent: "持续检查小明的新消息并根据上下文处理", eventId: "goal-submit-once" };
   const waiting = deliver(submission);
   assert.equal(waiting.state, "waiting");
   assert.equal(modelTurn, 1);
@@ -112,6 +123,8 @@ test("background goal persists progress and completes across screenshot cycles",
   assert.doesNotMatch(modelPrompts.at(-1), /天气摘要格式/);
   assert.match(modelPrompts.at(-1), /微信回复流程参考/);
   assert.doesNotMatch(modelPrompts.at(-1), /天气查询候选/);
+  assert.match(modelPrompts.at(-1), /小明喜欢周末徒步/);
+  assert.doesNotMatch(modelPrompts.at(-1), /小红/);
   assert.equal(records.get(`agent-runtime:${eventReceiptKey(submission.eventId)}`).value.state, "accepted");
   const duplicateSubmission = deliver(submission);
   assert.equal(duplicateSubmission.duplicate, true);
@@ -140,6 +153,94 @@ test("background goal persists progress and completes across screenshot cycles",
     "every recorded Worker trace event must be written as an independent record");
   assert.ok(journal.some((event) => event.phase === "model.requested"));
   assert.ok(journal.some((event) => event.phase === "action-loop.started"));
+});
+
+test("LLM can request exact object memory and HO recovers that request after a Worker restart", () => {
+  const records = new Map();
+  const goalId = "goal-object-memory-context";
+  const active = { goalId, taskId: "task-object-memory-context", runId: "run-object-memory-context",
+    intent: "给朋友回复消息", state: "running", step: 3, revision: 4, createdAt: Date.now(),
+    goalAttemptStartedAt: Date.now(), goalDeadlineAt: Date.now() + 20 * 60_000, progress: "准备查看当前会话",
+    actionLoop: { index: 1, status: "running", budgetMinutes: 15, estimatedMinutes: 5, elapsedMs: 30_000, segmentStartedAt: null }, trace: [] };
+  const provider = { baseUrl: "https://model.example", apiKey: "x".repeat(24), model: "vision-model" };
+  records.set("agent-runtime:active-goal", { value: active, revision: "1" });
+  records.set("knowledge:memory:contact-zhangsan", { value: {
+    id: "memory:contact-zhangsan", type: "memory", kind: "fact", state: "active",
+    objectRefs: ["contact:张三"], content: "张三喜欢周末徒步", sourceRefs: ["trace:synthetic"], observedAt: 10,
+    inference: "observed", tags: ["徒步"], revision: 1,
+  }, revision: "1" });
+  const actionPrompts = [];
+  let actionTurns = 0;
+  let captures = 0;
+  let memoryScans = 0;
+  let restartedDuringLookup = false;
+
+  function tool(method, params) {
+    if (method === "data.get") {
+      if (params.collection === "screen-interaction" && params.key === "provider") return { value: provider };
+      return records.get(`${params.collection}:${params.key}`) || null;
+    }
+    if (method === "data.scan") {
+      if (params.prefix === "memory:") memoryScans += 1;
+      return { items: [...records.entries()].filter(([key]) => key.startsWith(`${params.collection}:${params.prefix}`))
+        .slice(0, params.limit).map(([key, value]) => ({ key: key.slice(params.collection.length + 1), ...value })) };
+    }
+    if (method === "data.put") {
+      records.set(`${params.collection}:${params.key}`, { value: params.value, revision: "2" });
+      return { revision: "2" };
+    }
+    if (method === "data.batch") {
+      for (const item of params.operations) {
+        const key = `${item.collection}:${item.key}`;
+        if (item.op === "delete") records.delete(key);
+        else records.set(key, { value: item.value, revision: "2" });
+      }
+      return { results: [] };
+    }
+    if (method === "interaction.capture") {
+      captures += 1;
+      return { mime: "image/jpeg", width: 1, height: 1, dataBase64: "c3ludGhldGljLWZyYW1l" };
+    }
+    if (method === "network.request") {
+      const body = JSON.parse(params.bodyText);
+      const prompt = body.messages.map(message => typeof message.content === "string"
+        ? message.content : message.content?.map?.(part => part.text || "").join(" ")).join("\n");
+      if (prompt.includes("截图尺寸")) actionPrompts.push(prompt);
+      return modelCall(params, () => {
+        actionTurns += 1;
+        return actionTurns <= 2
+          ? { state: "context", evidence: "当前截图显示张三会话，回复时需要了解相关历史背景", contextRequest: { memoryObjectRefs: ["contact:张三"] } }
+          : { state: "done", evidence: "已结合张三的相关记忆完成回复并核对结果" };
+      });
+    }
+    throw new Error(`Unexpected tool: ${method}`);
+  }
+
+  let output = globalThis.onHaminnEvent({ type: "start" });
+  for (let turn = 0; output?.actions?.length && turn < 40; turn += 1) {
+    const call = output.actions[0];
+    if (!restartedDuringLookup && call.method === "data.scan" && call.params.prefix === "memory:" &&
+        records.get("agent-runtime:active-goal")?.value.pendingMemoryRequest) {
+      restartedDuringLookup = true;
+      output = globalThis.onHaminnEvent({ type: "start" });
+      continue;
+    }
+    output = globalThis.onHaminnEvent({ type: "tool.result", callId: call.callId, ok: true, result: tool(call.method, call.params) });
+  }
+
+  assert.equal(output.state, "done");
+  assert.equal(restartedDuringLookup, true);
+  assert.equal(actionTurns, 3);
+  assert.equal(captures, 3, "the model should inspect a fresh screenshot after ME returns context");
+  assert.equal(memoryScans, 2, "a duplicate context request must not repeat the memory scan");
+  assert.doesNotMatch(actionPrompts[0], /张三喜欢周末徒步/);
+  assert.match(actionPrompts[1], /张三喜欢周末徒步/);
+  assert.match(actionPrompts[1], /contact:张三/);
+  assert.match(actionPrompts[2], /本次 OST 已达到/);
+  const saved = records.get("agent-runtime:active-goal").value;
+  assert.equal(saved.trace.some(event => event.phase === "memory.context-requested"), true);
+  assert.equal(saved.trace.some(event => event.phase === "memory.context-loaded" && event.memoryCount === 1), true);
+  assert.equal(saved.trace.some(event => event.phase === "memory.context-query-limited"), true);
 });
 
 test("an EDT notification is deduplicated, matched by the LLM, and creates one separate OST after durable acknowledgement", () => {
@@ -1560,9 +1661,10 @@ test("an action response arriving after the AL budget is reviewed before any new
 
 test("LLM can start a new action loop after timeout and choose a reusable experience after success", () => {
   const records = new Map();
+  const memoryTrace = { at: Date.now() - 1000, step: 6, phase: "decision", decision: "action", evidence: "小明提到下周想讨论旅行计划" };
   const active = { goalId: "goal-new-action-loop", taskId: "task-new-action-loop", runId: "run-new-action-loop",
     intent: "完成合成任务", state: "running", step: 7, revision: 9, progress: "当前路径耗时较长",
-    actionLoop: { index: 2, status: "running", budgetMinutes: 15, estimatedMinutes: 15, elapsedMs: 15 * 60_000, segmentStartedAt: null }, trace: [] };
+    actionLoop: { index: 2, status: "running", budgetMinutes: 15, estimatedMinutes: 15, elapsedMs: 15 * 60_000, segmentStartedAt: null }, trace: [memoryTrace] };
   records.set("agent-runtime:active-goal", { value: active, revision: "4" });
   const provider = { baseUrl: "https://model.example", apiKey: "x".repeat(24), model: "vision-model" };
 
@@ -1582,6 +1684,8 @@ test("LLM can start a new action loop after timeout and choose a reusable experi
         experience: { title: "合成页面直接入口", situation: "合成测试页操作", approach: "先观察当前页面，再使用可见入口", successEvidence: "最终页面显示完成状态", toolRefs: ["interaction.capture", "interaction.tap"] },
         savePattern: true,
         pattern: { title: "简洁回复", condition: "给朋友回消息", guidance: "表达自然，不必复述对方原文", evidence: "成功任务中用户采用此表达方式" },
+        saveMemory: true,
+        memories: [{ kind: "episode", objectRefs: ["contact:小明"], content: "小明提到下周想讨论旅行计划。", inference: "observed", tags: ["旅行"], sourceRefs: [memorySourceRef(active.goalId, memoryTrace)] }],
         saveTool: true,
         tool: { name: "页面入口复核", description: "观察页面后选择已注册的交互工具", toolRefs: ["interaction.tap", "shell.exec"] },
       },
@@ -1606,6 +1710,11 @@ test("LLM can start a new action loop after timeout and choose a reusable experi
     createdAt: records.get(`self-model:bp:${active.goalId}`).value.createdAt,
   });
   assert.deepEqual(records.get(`knowledge:tool-candidate:${active.goalId}`).value.toolRefs, ["interaction.tap"]);
+  const memory = records.get(`knowledge:memory:${active.goalId}:1`).value;
+  assert.equal(memory.type, "memory");
+  assert.equal(memory.objectRefs[0], "contact:小明");
+  assert.equal(memory.inference, "observed");
+  assert.deepEqual(memory.sourceRefs, [memorySourceRef(active.goalId, memoryTrace)]);
 });
 
 test("the 30-minute deadline records an in-flight navigation receipt then stops before another observation", () => {

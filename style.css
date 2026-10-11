@@ -14,7 +14,7 @@
 
 * { box-sizing: border-box; }
 body { margin: 0; min-height: 100vh; background: #f3f5fa; color: var(--ink); }
-button, input { font: inherit; }
+button, input, textarea { font: inherit; }
 
 .page {
   width: min(100%, 520px);
@@ -77,6 +77,25 @@ h2 { margin: 0; font-size: 17px; }
 .secondary { background: #eef2fa; color: #26344c; }
 .danger { background: #fff0f0; color: #a83239; }
 .worker-note { margin: 10px 0 0; }
+.memory-panel { margin-top: 16px; }
+.memory-refresh { width: auto; min-height: 34px; padding: 0 12px; font-size: 12px; }
+.memory-description { margin: 10px 0; color: var(--muted); font-size: 12px; line-height: 1.55; }
+.memory-details { color: var(--muted); font-size: 12px; }
+.memory-details summary { cursor: pointer; color: #26344c; font-weight: 650; }
+.memory-notice { margin: 10px 0; font-size: 11px; line-height: 1.5; }
+.memory-notice[data-tone="error"] { color: #a83239; }
+.memory-notice[data-tone="success"] { color: #167653; }
+.memory-list { display: grid; gap: 9px; }
+.memory-entry { padding: 11px; border: 1px solid var(--line); border-radius: 12px; background: #fbfcff; }
+.memory-entry-title { margin: 0; color: var(--ink); font-size: 12px; font-weight: 700; overflow-wrap: anywhere; }
+.memory-entry-meta { margin: 4px 0 8px; font-size: 10px; line-height: 1.5; overflow-wrap: anywhere; }
+.memory-entry-content { margin: 0; color: #38465d; font-size: 12px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
+.memory-entry-editor { width: 100%; min-height: 92px; padding: 9px; border: 1px solid var(--line); border-radius: 9px; background: white; color: var(--ink); resize: vertical; }
+.memory-entry-objects { width: 100%; box-sizing: border-box; margin-top: 8px; padding: 9px; border: 1px solid var(--line); border-radius: 9px; background: white; color: var(--ink); font: inherit; font-size: 12px; }
+.memory-entry-actions { display: flex; gap: 7px; margin-top: 9px; }
+.memory-entry-actions .button { min-height: 34px; padding: 0 10px; font-size: 11px; }
+.memory-entry-actions .danger { color: #a83239; }
+.memory-load-more { min-height: 38px; margin-top: 9px; }
 
 @media (max-width: 370px) {
   .page { padding-right: 14px; padding-left: 14px; }

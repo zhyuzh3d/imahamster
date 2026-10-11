@@ -12,6 +12,8 @@ test("CAE assembles a bounded action context without mutating the OST", () => {
     actionLoopHistory: Array.from({ length: 8 }, (_, index) => ({ index, status: "reviewed", strategy: `路线 ${index}` })),
     trace: Array.from({ length: 24 }, (_, index) => ({ step: index, phase: `phase-${index}`, message: "异常".repeat(100) })),
     experiences: Array.from({ length: 7 }, (_, index) => ({ title: `经验 ${index}`, situation: "收消息", approach: "观察", successEvidence: "气泡可见" })),
+    memories: Array.from({ length: 7 }, (_, index) => ({ id: `memory:${index}`, kind: "fact", objectRefs: ["contact:小明"], content: `小明记忆 ${index}`, sourceRefs: [`trace:${index}`], inference: "observed", tags: ["朋友"], revision: 1 })),
+    memoryLookupRefs: ["contact:小明"],
     behaviorPatterns: Array.from({ length: 7 }, (_, index) => ({ title: `模式 ${index}`, condition: "回复消息", guidance: "简洁", evidence: "用户明确选择" })),
     toolCandidates: Array.from({ length: 5 }, (_, index) => ({ name: `候选 ${index}`, description: "仅提供参考", toolRefs: ["interaction.tap"] })),
     pendingOperationId: "op-1",
@@ -28,6 +30,10 @@ test("CAE assembles a bounded action context without mutating the OST", () => {
   assert.match(context, /待核实操作/);
   assert.match(context, /经验 0/);
   assert.doesNotMatch(context, /经验 5/);
+  assert.match(context, /小明记忆 0/);
+  assert.doesNotMatch(context, /小明记忆 5/);
+  assert.match(context, /sourceRefs/);
+  assert.match(context, /已查询过的对象记忆范围/);
   assert.match(context, /模式 0/);
   assert.doesNotMatch(context, /模式 5/);
   assert.match(context, /候选 0/);
