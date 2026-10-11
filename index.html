@@ -59,6 +59,20 @@
       <p class="privacy-note worker-note">暂停会在停止后台执行后保存进度；继续时先重新截图核对未完成操作。</p>
     </section>
 
+    <section id="bp-panel" class="card memory-panel" aria-labelledby="bp-title">
+      <div class="card-heading">
+        <h2 id="bp-title">Persona · BP</h2>
+        <button id="bp-refresh" class="button secondary memory-refresh" type="button" disabled>刷新</button>
+      </div>
+      <p class="memory-description">查看、修订、停用或删除 ImHamster 从已完成任务中归纳的全局行为模式。BP 是可编辑偏好，不会改变用户目标或 Identity Core。</p>
+      <details id="bp-details" class="memory-details">
+        <summary>查看和管理行为模式</summary>
+        <p id="bp-notice" class="memory-notice" role="status" aria-live="polite">展开后读取本机行为模式</p>
+        <div id="bp-list" class="bp-list"></div>
+        <button id="bp-load-more" class="button secondary memory-load-more" type="button" hidden>加载更多</button>
+      </details>
+    </section>
+
     <section id="memory-panel" class="card memory-panel" aria-labelledby="memory-title">
       <div class="card-heading">
         <h2 id="memory-title">自我模型 · Memory</h2>

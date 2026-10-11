@@ -44,7 +44,7 @@
   let submissionDeadlineAt = 0;
   let workerControlBusy = false;
   let hoControlModule = null;
-  let memoryPanelController = null;
+  let selfModelPanelController = null;
 
 
 
@@ -1352,12 +1352,12 @@
 
   window.haminn?.on("overlay.clicked", runFromOverlay);
 
-  void import("./ui/self-model.mjs").then(({ mountMemoryPanel }) => {
-    memoryPanelController = mountMemoryPanel();
-    memoryPanelController.setReady(ready && window.haminn?.isReady === true);
+  void import("./ui/self-model.mjs").then(({ mountSelfModelPanel }) => {
+    selfModelPanelController = mountSelfModelPanel();
+    selfModelPanelController.setReady(ready && window.haminn?.isReady === true);
   }).catch(error => {
-    console.error("ImHamster Memory panel failed to load", error);
-    if (ready) setMessage("记忆管理界面无法加载：" + String(error?.message || error).slice(0, 180), "error");
+    console.error("ImHamster self-model panel failed to load", error);
+    if (ready) setMessage("自我模型管理界面无法加载：" + String(error?.message || error).slice(0, 180), "error");
   });
 
   window.addEventListener("pagehide", () => {
@@ -1378,7 +1378,7 @@
   async function onReady() {
     if (ready) return;
     ready = true;
-    memoryPanelController?.setReady(window.haminn?.isReady === true);
+    selfModelPanelController?.setReady(window.haminn?.isReady === true);
     try {
       const consentRecord = await haminn.data.get({ collection: "screen-interaction", key: "consent-v2" });
       consent.checked = consentRecord?.value === true;

@@ -12,6 +12,7 @@ test("SM retrieves matching global behavior patterns and excludes memories or un
     pattern("简洁友好回复", "回复微信朋友消息", "用自然、简短、友好的语气", 1),
     pattern("天气查询", "查看天气预报", "优先查看本地天气", 2),
     pattern("不活跃模式", "回复微信消息", "遵循旧模式", 9, { state: "inactive" }),
+    pattern("用户停用模式", "回复微信消息", "不应进入上下文", 11, { state: "disabled" }),
     { value: { type: "experience", state: "active", scope: "global", title: "微信经验", condition: "回复", guidance: "操作" } },
     pattern("应用专属模式", "回复微信消息", "应用私有指导", 10, { scope: "app" }),
   ];

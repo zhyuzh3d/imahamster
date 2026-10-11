@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { prepareMemoryEdit } from "./self-model.mjs";
+import { prepareMemoryEdit } from "./memory.mjs";
 
 test("memory edits preserve evidence metadata and advance the app revision", () => {
   const current = { id: "memory:contact-a", content: "旧内容", objectRefs: ["contact:A"], revision: 3,

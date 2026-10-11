@@ -513,7 +513,12 @@ JS 测试适合纯状态与组装；QuickJS/Android 仪器测试负责真实模�
 - 通用缺口：此前 ME 只有任务经验，学习提示还排除了联系人事实；当 OST 指令只说“回复新消息”时，启动阶段也不知道当前截图中的对象，因而既不能积累对象记忆，也不能在不泄露其他联系人数据的前提下取回它。
 - 新增 `agent/me/memory.mjs`：支持有界的 fact/episode 记忆，必需对象范围、简短内容、观察/推测类型与来自本 OST 轨迹的 `sourceRefs`；学习回包只允许引用已提供的 trace reference，最多保存 3 条。检索严格按意图中明确出现的对象匹配；对象未命名时不把其他联系人的近似内容混入提示。
 - CAE/Worker 增加 `context` 决策：LLM 可在截图识别联系人后请求精确 `objectRef`，ME 按精确对象过滤最多 5 条，HO 持久化查询状态、加载结果并重新截图后再继续。每个 OST 最多查询 8 个对象范围，重复请求直接反馈已查询状态；未完成的查询在 Worker 重启后由原持久请求恢复。学习改为保存短小、有来源的事实/事件摘要，避免复制整段聊天并区分 observed/inferred。
-- 全量 `node --test` 85/85 通过；新增 ME schema/过滤、CAE 上下文、Worker 精确对象查询和查询中断后重启恢复测试。复核发现对象 Memory 查询格式误放在 AL 预算复盘提示中，实际截图决策提示未说明 `state=context`；已移入截图决策提示，并增加断言确认模型收到正确格式。Memory 管理从主页面抽入 `ui/self-model.mjs`，提供延迟分页读取、纯文本展示、对象范围与内容修订、二次确认删除和 Bridge revision 并发保护；`node --check` 与 `git diff --check` 通过。记忆合并/替代修订、设备运行以及微信真机行为仍未实现/验收，因此 U3/U5 仍未完成。版本为 `0.1.39 / code 40`；本次复核 macOS USB 总线可见 CMA-AN00，但重启并刷新 ADB 后仍只枚举 `emulator-5554`，真机调试通道尚未恢复。
+- 全量 `node --test` 85/85 通过；新增 ME schema/过滤、CAE 上下文、Worker 精确对象查询和查询中断后重启恢复测试。复核发现对象 Memory 查询格式误放在 AL 预算复盘提示中，实际截图决策提示未说明 `state=context`；已移入截图决策提示，并增加断言确认模型收到正确格式。Memory 管理从主页面抽到 `ui/memory.mjs`，由 `ui/self-model.mjs` 汇总，提供延迟分页读取、纯文本展示、对象范围与内容修订、二次确认删除和 Bridge revision 并发保护；`node --check` 与 `git diff --check` 通过。记忆合并/替代修订、设备运行以及微信真机行为仍未实现/验收，因此 U3/U5 仍未完成。版本为 `0.1.39 / code 40`；本次复核 macOS USB 总线可见 CMA-AN00，但重启并刷新 ADB 后仍只枚举 `emulator-5554`，真机调试通道尚未恢复。
+
+### 10.25 Persona BP 管理界面（2026-10-11）
+
+- 按现有 BP 合同新增独立管理模块 `ui/behavior-patterns.mjs`，只读取 `self-model` 集合内 `bp:` 记录；支持分页查看、编辑标题/适用情境/行为建议/来源依据、启用/停用和二次确认删除。所有写入使用 Haminn Bridge revision 做 CAS，编辑与状态切换保留 `sourceGoalId` 和创建时间；停用状态不会进入 `retrieveBehaviorPatterns` 的动作上下文。
+- `ui/self-model.mjs` 组合 BP 和 Memory 管理模块，主页面只负责挂载；新增表单合同测试覆盖来源保留、字段限制和停用/恢复状态。当前 BP 仅支持全局范围，没有按应用/对象分类；通用工具候选仍未有用户管理界面。真机 ADB 与行为验收待调试授权恢复。
 
 ## 11. 交付与完成判定
 
