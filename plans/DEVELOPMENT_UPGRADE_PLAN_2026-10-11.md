@@ -696,6 +696,12 @@ JS 测试适合纯状态与组装；QuickJS/Android 仪器测试负责真实模�
 - 本次 Gradle 增量构建与仪器测试成功；NDK 配置输出 SDK XML 版本提示但未影响构建或测试。证据仅覆盖 API 37 模拟器宿主，不覆盖 CMA-AN00 的无障碍授权、HAPP 实际 DEV 模块图、后台进程重建、持续通知/定时服务、模型质量或微信行为；不关闭 U0/U1/U4/U6。
 - 最新设备快照仍是 macOS 能识别 CMA-AN00、ADB 仅列出 `emulator-5554`、Haminn DEV `runtime=not-visible`。下一步继续在真实 USB 调试通道建立后部署 Haminn/ImHamster 并验证版本、权限与真实 Worker 运行，随后由 ImHamster 执行合成微信目标并按完整操作轨迹迭代。
 
+### 10.53 Haminn 全量 Android 仪器套件结果与失败分类（2026-10-11）
+
+- 在同一 API 37 模拟器运行 `:app:connectedDebugAndroidTest`：107 项中 89 项通过、17 项失败、1 项跳过。与本产品核心执行链直接相关的 `WorkerRuntimeTest`（6/6）、`QuickJsRuntimeTest`（8/8）、`ImHamsterDevWorkerSourceTest`（1/1）、`WorkerHostServiceTest`（5/5）、`WorkerTimerScheduleInstrumentedTest`（7/7）、`NotificationEventRouterTest`（1/1）、`CapabilityKernelInstrumentedTest`（3/3）、HTTP 请求取消/复用（7/7）均通过。
+- 失败分布为 `ActivitySmokeTest` 9 项（语言/开发密码/导航和页面断言）、`AgentDevelopmentTest` 3 项（代理事件与 DEV 回执断言）、`PersistenceInstrumentedTest` 1 项（测试尝试向 localhost 下载包，被生产 SSRF 防护拒绝）、`ScreenCaptureInstrumentedTest` 4 项。其中 3 项因该 API 37 instrumentation 的 UiAutomation 未连接而无法读取系统窗口；另 1 项实际发现 `runtime.capabilities` 的 screen `features` 未暴露测试期望的 `audioModes`，需要核对该通用屏幕能力描述合同。它与 ImHamster 当前调用的 `screen.interaction` 不同，未在本轮扩展修复。
+- 本节记录了失败分类和当前运行态，不能将整套 Haminn 仪器测试称为全绿。上述绿项只证明模拟器上的宿主执行/续调度/事件路径；17 项失败仍需在目标归属的独立 Haminn 任务中按其合同逐项处理或确认测试假设，真机功能和微信场景仍须 CMA-AN00 证据。
+
 ## 11. 交付与完成判定
 
 ImHamster 与 Haminn 独立提交、验证和推送；每次提交前核对各自 Git 根与 origin，保留无关工作区改动。宿主新增合同需同步 SDK/能力文档/实际实现，消费者只接入确实支持的能力。
