@@ -19,9 +19,11 @@ import { applyCurrentOperationOutcome, ensurePendingOperationHistory, rememberPe
 import {
   createEventTask,
   notificationInboxKey,
+  timerInboxKey,
   normalizeEventTaskPlan,
   parseEventMatchDecision,
   sanitizeNotificationEvent,
+  sanitizeTimerEvent,
   transitionEventTask,
 } from "./ho/edts.mjs";
 import {
@@ -65,6 +67,8 @@ let journalCommitCallId = null;
 let pendingGoalSubmit = null;
 let pendingNotificationEvent = null;
 let pendingNotificationRecord = null;
+let pendingTimerEvent = null;
+let pendingTimerRecord = null;
 let pendingEventTaskRecord = null;
 let pendingEventTaskControl = null;
 let startupNeedsQueueDrain = false;
@@ -331,9 +335,11 @@ function requestActionLoopPlan() {
 }
 
 function requestInitialTaskPlan() {
+  const currentTime = `设备当前 epoch 毫秒：${Date.now()}；设备本地时间：${new Date().toString()}。`;
   const messages = [
     { role: "system", content: SYSTEM_PROMPT },
-    { role: "user", content: `用户语义指令：${state.intent}\n先由你判断这是立即执行的单次任务 One-shot task（OST），还是需要长期等待外部事件并在每次触发时新建 OST 的事件驱动任务 Event-driven task（EDT）。只将明确长期监听/定时/条件触发的目标判为 EDT。若为 EDT，判断当前 Haminn 支持的通知触发类型，返回 taskType=event-driven、trigger.kind=notification、精确 sourcePackages（最多 16 个）和简要 description；不得用通配符，也不得扩大到用户未指定的应用。若无法确定来源应用包名或触发条件，返回 taskType=one-shot 并在 classificationQuestion 说明需要用户补充，不能擅自订阅所有应用。对于 EDT 不创建 AL，也不设置单次 OST 时限；对于 OST，在本 AL 开始任何屏幕动作前，先预估本次 AL 需要的分钟数，估计必须是 1 到 30 的整数，默认预算 15 分钟，预算至少覆盖预估且最多 30 分钟，并给出最短可行策略。只返回 JSON：OST 示例 {"taskType":"one-shot","estimatedMinutes":5,"budgetMinutes":15,"strategy":"先观察并直接完成","classificationQuestion":""}；EDT 示例 {"taskType":"event-driven","trigger":{"kind":"notification","sourcePackages":["com.example.chat"],"description":"该应用出现符合用户要求的新通知"}}` },
+    { role: "user", content: `${currentTime}\n用户语义指令：${state.intent}
+先由你判断这是立即执行的单次任务 One-shot task（OST），还是需要等待外部事件并在每次触发时新建 OST 的事件驱动任务 Event-driven task（EDT）。只将明确长期监听、定时或条件触发的目标判为 EDT。通知 EDT 必须返回 trigger.kind=notification、精确 sourcePackages（最多 16 个）和简要 description；不得用通配符，也不得扩大到用户未指定的应用。定时 EDT 返回 trigger.kind=timer 和 schedule：一次性使用 {"kind":"once","at":<未来 epoch 毫秒>}；固定间隔使用 {"kind":"interval","intervalMs":<至少 60000> ,"firstAt":<可选 epoch 毫秒>}；每周重复使用 {"kind":"calendar","daysOfWeek":[1到7，周一为1],"hour":<设备本地小时>,"minute":<设备本地分钟>}。日历时间按设备本地时钟；epoch 时间按 UTC 毫秒。若时间、触发来源或规则无法确定，返回 classificationQuestion 请求补充，不能猜测。Haminn 负责持久化 timer；每次实际触发会建立一个独立 OST，EDT 自身没有单次时限。对于 OST，在本 AL 开始任何屏幕动作前，先预估本次 AL 分钟数，必须是 1 到 30 的整数，默认预算 15 分钟且至少覆盖预估，并给出最短可行策略。只返回 JSON：OST 示例 {"taskType":"one-shot","estimatedMinutes":5,"budgetMinutes":15,"strategy":"先观察并直接完成","classificationQuestion":""}；通知 EDT 示例 {"taskType":"event-driven","trigger":{"kind":"notification","sourcePackages":["com.example.chat"],"description":"该应用出现符合用户要求的新通知"}}；计时 EDT 示例 {"taskType":"event-driven","trigger":{"kind":"timer","schedule":{"kind":"calendar","daysOfWeek":[1,2,3,4,5,6,7],"hour":9,"minute":0},"description":"每天上午九点执行"}}` },
   ];
   return requestProvider("al-plan", "task.classification-requested", {}, messages);
 }
@@ -455,6 +461,11 @@ function readNextNotificationEvent() {
   return action("data.scan", { collection: "inbox", prefix: NOTIFICATION_INBOX_PREFIX, limit: 1 });
 }
 
+function readNextTimerEvent() {
+  pending = "timer-read";
+  return action("data.scan", { collection: "inbox", prefix: "t:", limit: 1 });
+}
+
 function beginEventTaskControl(event) {
   const eventId = assertEventId(event.eventId);
   const eventTaskId = String(event.eventTaskId || "");
@@ -483,10 +494,13 @@ function eventTaskGoalAndTaskRecords(eventTask) {
   const stateValue = eventTask.state;
   const cancelled = stateValue === "cancelled";
   const paused = stateValue === "paused";
+  const completed = stateValue === "completed";
   const needsUser = ["needs-user", "needs-app-authorization", "needs-system-access"].includes(stateValue);
-  const progress = stateValue === "active" ? "事件任务已启用，等待符合条件的通知。"
+  const triggerWait = eventTask.trigger?.kind === "timer" ? "等待计划时间触发。" : "等待符合条件的通知。";
+  const progress = stateValue === "active" ? `事件任务已启用，${triggerWait}`
     : stateValue === "paused" ? "事件任务已暂停。"
       : stateValue === "cancelled" ? "事件任务已取消。"
+        : completed ? "一次性事件任务已触发并完成监听。"
         : stateValue === "needs-user" ? `事件任务需要补充：${String(eventTask.lastQuestion || "").slice(0, 240)}`
           : stateValue === "needs-system-access" ? "需要 Haminn 的 Android 通知使用权。"
             : stateValue === "needs-app-authorization" ? "需要授予 ImHamster 的通知读取能力。"
@@ -496,14 +510,14 @@ function eventTaskGoalAndTaskRecords(eventTask) {
     record("goals", `g:${eventTask.goalId}`, {
       schemaVersion: 1, goalId: eventTask.goalId, intent: eventTask.intent, scope: {}, taskKind: "EDT",
       triggers: [eventTask.trigger], completion: "由 LLM 按事件逐次评估并对每次触发建立独立 OST",
-      priority: 0, state: cancelled ? "cancelled" : paused ? "paused" : "active",
+      priority: 0, state: cancelled ? "cancelled" : completed ? "completed" : paused ? "paused" : "active",
       revision: Number(eventTask.revision || 1), acceptedBoundary: "after-creation", progress,
       createdAt: eventTask.createdAt, updatedAt: now,
     }),
     record("tasks", `t:${eventTask.taskId}`, {
       schemaVersion: 1, taskId: eventTask.taskId, goalId: eventTask.goalId, runId: eventTask.runId,
       revision: Number(eventTask.revision || 1), kind: "event-monitor", objective: eventTask.intent,
-      state: cancelled ? "cancelled" : paused ? "paused" : "waiting", dependencies: [], objectKey: null,
+      state: cancelled ? "cancelled" : completed ? "completed" : paused ? "paused" : "waiting", dependencies: [], objectKey: null,
       progress, waiting, resultRefs: [], createdAt: eventTask.createdAt, updatedAt: now,
     }),
   ];
@@ -514,6 +528,12 @@ function requestEventTaskControlEffect() {
   const eventTask = control?.eventTask;
   if (!control || !eventTask) throw new Error("事件任务控制缺少持久任务记录");
   pending = "event-task-control-effect";
+  if (eventTask.trigger.kind === "timer") {
+    return action(control.command === "resume" ? "timers.schedule" : "timers.cancel",
+      control.command === "resume"
+        ? { timerId: eventTask.eventTaskId, schedule: eventTask.trigger.schedule }
+        : { timerId: eventTask.eventTaskId });
+  }
   return action(control.command === "resume" ? "notifications.subscribe" : "notifications.unsubscribe",
     control.command === "resume"
       ? { subscriptionId: eventTask.eventTaskId, sourcePackages: eventTask.trigger.sourcePackages }
@@ -524,8 +544,10 @@ function saveEventTaskControlResult(result) {
   const control = pendingEventTaskControl;
   const eventTask = control?.eventTask;
   if (!control || !eventTask) throw new Error("事件任务控制回执缺少任务");
+  const isTimer = eventTask.trigger.kind === "timer";
   const ready = result?.ready === true && (control.command === "resume"
-    ? result?.state === "subscribed" : result?.state === "unsubscribed");
+    ? result?.state === (isTimer ? "scheduled" : "subscribed")
+    : result?.state === (isTimer ? "cancelled" : "unsubscribed"));
   const finalState = control.command === "pause" ? (ready ? "paused" : "active")
     : control.command === "cancel" ? (ready ? "cancelled" : "active")
       : ready ? "active" : result?.state === "needs-system-access" ? "needs-system-access" : "needs-app-authorization";
@@ -534,10 +556,16 @@ function saveEventTaskControlResult(result) {
   eventTask.revision = Number(eventTask.revision || 0) + 1;
   eventTask.updatedAt = now;
   eventTask.lastControlError = ready ? null : control.command === "resume"
-    ? "通知订阅尚未可用；检查 Happ 能力和 Android 通知使用权后重试。"
+    ? isTimer ? "Haminn 未能恢复该计时任务，请检查 Worker 授权和系统后台运行状态后重试。"
+      : "通知订阅尚未可用；检查 Happ 能力和 Android 通知使用权后重试。"
       : String(result?.error || "通知订阅未能移除").slice(0, 240);
   eventTask.registration = { ...(eventTask.registration || {}), state: String(result?.state || "unknown"),
-    listenerAccess: result?.listenerAccess === true, updatedAt: now };
+    ...(isTimer ? { nextDueAt: Number(result?.nextDueAt) || null,
+      scheduleRevision: Number(result?.scheduleRevision) || null, precision: String(result?.precision || "system-managed") }
+      : { listenerAccess: result?.listenerAccess === true }), updatedAt: now };
+  if (isTimer && control.command === "resume" && result?.schedule && typeof result.schedule === "object") {
+    eventTask.trigger = { ...eventTask.trigger, schedule: result.schedule };
+  }
   if (control.command === "resume" && (control.reply || eventTask.pendingClarification)) {
     const clarifications = Array.isArray(eventTask.clarifications) ? eventTask.clarifications.slice(-9) : [];
     const clarification = control.reply || String(eventTask.pendingClarification || "");
@@ -562,7 +590,7 @@ function saveEventTaskControlResult(result) {
   ];
   if (state?.state === "event-driven" && state.eventTaskId === eventTask.eventTaskId) {
     state.eventTaskState = finalState;
-    state.progress = finalState === "active" ? "事件任务已启用，等待符合条件的通知。"
+    state.progress = finalState === "active" ? isTimer ? "事件任务已启用，等待计划时间触发。" : "事件任务已启用，等待符合条件的通知。"
       : finalState === "paused" ? "事件任务已暂停。"
         : finalState === "cancelled" ? "事件任务已取消。" : eventTask.lastControlError;
     state.revision = Number(state.revision || 0) + 1;
@@ -682,6 +710,82 @@ function saveNotificationEvent() {
   ];
   pendingNotificationEvent = null;
   pending = "notification-event-saved";
+  return action("data.batch", { operations });
+}
+
+function acceptTimerEvent(rawEvent) {
+  pendingTimerEvent = sanitizeTimerEvent(rawEvent);
+  pending = "timer-receipt-read";
+  return action("data.get", { collection: COLLECTION, key: eventReceiptKey(pendingTimerEvent.eventId) });
+}
+
+function saveTimerEvent() {
+  const event = pendingTimerEvent;
+  if (!event) throw new Error("计时事件入箱缺少事件内容");
+  const key = timerInboxKey(event.eventId);
+  const now = Date.now();
+  const receipt = createEventReceipt(event.eventId, "timer.fired", {
+    state: "received", timerId: event.timerId, inboxKey: key,
+    scheduledAt: event.scheduledAt, occurredAt: event.occurredAt,
+    missedCount: event.missedCount, scheduleRevision: event.scheduleRevision,
+  }, now);
+  const operations = [
+    record("inbox", key, { ...event, state: "received", receivedAt: now }),
+    record(COLLECTION, eventReceiptKey(event.eventId), receipt),
+  ];
+  pendingTimerEvent = null;
+  pending = "timer-event-saved";
+  return action("data.batch", { operations });
+}
+
+function createTimerTriggeredOst(event, eventTask, inboxRecord) {
+  const now = Date.now();
+  const oneShot = eventTask.trigger.schedule.kind === "once";
+  const nextEventTask = { ...eventTask, state: oneShot ? "completed" : "active",
+    revision: Number(eventTask.revision || 0) + 1, updatedAt: now,
+    lastEventAt: event.occurredAt, lastEventState: "triggered", lastEventId: event.eventId,
+    lastMissedCount: event.missedCount };
+  nextEventTask.journalSequence = Number(eventTask.journalSequence || 0) + 1;
+  const journalEntry = makeJournalEntry({ goalId: eventTask.goalId, taskId: eventTask.taskId, runId: eventTask.runId }, nextEventTask.journalSequence, {
+      at: now, step: 0, phase: "event-task.timer-triggered", eventTaskId: eventTask.eventTaskId,
+      eventId: event.eventId, scheduledAt: event.scheduledAt, occurredAt: event.occurredAt,
+      missedCount: event.missedCount, scheduleRevision: event.scheduleRevision,
+    });
+  const journal = record("agent-events", journalEntry.key, journalEntry.value);
+  const operations = makeGoalAndTask(eventTask.intent);
+  state.runId = operations[1].value.runId;
+  state.taskType = "one-shot";
+  state.taskKind = "OST";
+  state.parentEventTaskId = eventTask.eventTaskId;
+  state.sourceEventId = event.eventId;
+  state.triggerOccurredAt = event.occurredAt;
+  state.triggerContext = { kind: "timer", scheduledAt: event.scheduledAt, occurredAt: event.occurredAt,
+    missedCount: event.missedCount, scheduleRevision: event.scheduleRevision };
+  state.goalAttemptStartedAt = now;
+  state.goalDeadlineAt = now + MAX_GOAL_DURATION_MS;
+  state.state = "event-start-pending";
+  state.progress = "计时事件已持久接收，准备开始本次 OST。";
+  state.pendingEventStartFor = event.eventId;
+  appendTrace("event-task.ost-created", { eventTaskId: eventTask.eventTaskId,
+    sourceEventId: event.eventId, sourceKind: "timer", missedCount: event.missedCount, ostId: state.goalId });
+  operations[0].value.taskKind = "OST";
+  operations[0].value.parentEventTaskId = eventTask.eventTaskId;
+  operations[0].value.sourceEventId = event.eventId;
+  operations[1].value.kind = "event-triggered-work";
+  operations[1].value.parentEventTaskId = eventTask.eventTaskId;
+  operations[1].value.sourceEventId = event.eventId;
+  const receipt = createEventReceipt(event.eventId, "timer.fired", {
+    state: "triggered", timerId: event.timerId, eventTaskId: eventTask.eventTaskId,
+    ostId: state.goalId, scheduledAt: event.scheduledAt, occurredAt: event.occurredAt,
+    missedCount: event.missedCount, scheduleRevision: event.scheduleRevision,
+  }, inboxRecord.value.receivedAt || now);
+  operations.push(
+    record(EVENT_TASKS_COLLECTION, `ed:${nextEventTask.eventTaskId}`, nextEventTask),
+    record(COLLECTION, eventReceiptKey(event.eventId), receipt),
+    { op: "delete", collection: "inbox", key: inboxRecord.key, expectedRevision: inboxRecord.revision },
+    journal,
+  );
+  pending = "timer-trigger-created";
   return action("data.batch", { operations });
 }
 
@@ -875,12 +979,15 @@ function registerEventTask(trigger) {
   state.goalAttemptStartedAt = null;
   state.state = "event-driven";
   state.waiting = null;
-  state.progress = "正在登记事件触发；完成后每次符合条件的通知都会建立独立 OST。";
+  state.progress = trigger.kind === "timer"
+    ? "正在登记持久计时；每次到达计划时间都会建立独立 OST。"
+    : "正在登记通知触发；每次符合条件的通知都会建立独立 OST。";
   const eventTask = createEventTask({ eventTaskId: state.eventTaskId, goalId: state.goalId,
     taskId: state.taskId, runId: state.runId, intent: state.intent, trigger, at: now });
   pendingEventTaskRecord = eventTask;
   appendTrace("event-task.registration-started", { eventTaskId: eventTask.eventTaskId,
-    triggerKind: trigger.kind, sourcePackageCount: trigger.sourcePackages.length });
+    triggerKind: trigger.kind, ...(trigger.kind === "notification" ? { sourcePackageCount: trigger.sourcePackages.length }
+      : { scheduleKind: trigger.schedule.kind }) });
   eventTask.journalSequence = Number(state.journalSequence || 0);
   const goal = { schemaVersion: 1, goalId: state.goalId, intent: state.intent, taskKind: "EDT",
     triggers: [trigger], completion: "由 LLM 按事件逐次评估并对每次触发建立独立 OST",
@@ -903,7 +1010,12 @@ function registerEventTask(trigger) {
 function requestEventTaskSubscription() {
   const task = pendingEventTaskRecord;
   if (!task) throw new Error("事件任务订阅缺少已保存任务");
-  return tracedCall("event-task.subscription-requested", {
+  if (task.trigger.kind === "timer") {
+    return tracedCall("event-task.timer-schedule-requested", {
+      eventTaskId: task.eventTaskId, scheduleKind: task.trigger.schedule.kind,
+    }, "timers.schedule", { timerId: task.eventTaskId, schedule: task.trigger.schedule }, "event-task-subscription");
+  }
+  return tracedCall("event-task.notification-subscription-requested", {
     eventTaskId: task.eventTaskId, sourcePackageCount: task.trigger.sourcePackages.length,
   }, "notifications.subscribe", {
     subscriptionId: task.eventTaskId, sourcePackages: task.trigger.sourcePackages,
@@ -914,18 +1026,25 @@ function saveEventTaskSubscriptionResult(result) {
   const eventTask = pendingEventTaskRecord;
   if (!eventTask) throw new Error("事件任务订阅回执缺少任务");
   const now = Date.now();
-  const ready = result?.ready === true && result?.state === "subscribed";
+  const isTimer = eventTask.trigger.kind === "timer";
+  const ready = result?.ready === true && result?.state === (isTimer ? "scheduled" : "subscribed");
+  if (isTimer && result?.schedule && typeof result.schedule === "object") {
+    eventTask.trigger = { ...eventTask.trigger, schedule: result.schedule };
+  }
   eventTask.state = ready ? "active" : result?.state === "needs-system-access"
     ? "needs-system-access" : "needs-app-authorization";
   eventTask.revision += 1;
   eventTask.updatedAt = now;
   eventTask.registration = { state: String(result?.state || "unknown"),
-    listenerAccess: result?.listenerAccess === true, updatedAt: now };
+    ...(isTimer ? { nextDueAt: Number(result?.nextDueAt) || null,
+      scheduleRevision: Number(result?.scheduleRevision) || null, precision: String(result?.precision || "system-managed") }
+      : { listenerAccess: result?.listenerAccess === true }), updatedAt: now };
   state.state = "event-driven";
-  state.progress = ready ? "事件任务已启用，等待符合条件的通知。"
-    : result?.state === "needs-system-access"
-      ? "需要在 Android 通知使用权设置中允许 Haminn，再继续启用此事件任务。"
-      : "需要授予此 happ 的通知读取能力，再继续启用此事件任务。";
+  state.progress = ready ? isTimer ? "事件任务已启用，等待计划时间触发。" : "事件任务已启用，等待符合条件的通知。"
+    : isTimer ? "Haminn 未能登记计时任务，请检查 Worker 授权和系统后台运行状态。"
+      : result?.state === "needs-system-access"
+        ? "需要在 Android 通知使用权设置中允许 Haminn，再继续启用此事件任务。"
+        : "需要授予此 happ 的通知读取能力，再继续启用此事件任务。";
   state.waiting = ready ? null : { category: "notification-authorization", reason: state.progress,
     userRequired: true, since: now };
   appendTrace(ready ? "event-task.active" : "event-task.authorization-required", {
@@ -1351,13 +1470,62 @@ function advanceAfterTool(event) {
       if (state && !terminal(state.state)) return { state: state.state, notificationQueued: true };
       return readNextQueuedGoal();
     }
+    case "timer-receipt-read": {
+      if (!pendingTimerEvent) throw new Error("计时事件回执检查缺少原始事件");
+      if (result?.value) {
+        const duplicate = pendingTimerEvent.eventId;
+        pendingTimerEvent = null;
+        return { state: state?.state || "idle", duplicate: true, eventId: duplicate };
+      }
+      return saveTimerEvent();
+    }
+    case "timer-event-saved": {
+      if (state && !terminal(state.state)) return { state: state.state, timerQueued: true };
+      return readNextQueuedGoal();
+    }
     case "notification-read": {
       const item = result?.items?.[0];
-      if (!item) return { state: state?.state || "idle", progress: state?.progress || "" };
+      if (!item) return readNextTimerEvent();
       pendingNotificationRecord = item;
       pending = "event-task-read";
       return action("data.get", { collection: EVENT_TASKS_COLLECTION, key: `ed:${item.value.subscriptionId}` });
     }
+    case "timer-read": {
+      const item = result?.items?.[0];
+      if (!item) return { state: state?.state || "idle", progress: state?.progress || "" };
+      pendingTimerRecord = item;
+      pending = "timer-event-task-read";
+      return action("data.get", { collection: EVENT_TASKS_COLLECTION, key: `ed:${item.value.timerId}` });
+    }
+    case "timer-event-task-read": {
+      const item = pendingTimerRecord;
+      pendingTimerRecord = null;
+      const event = item?.value;
+      const eventTask = result?.value;
+      if (!item || !event) throw new Error("计时触发队列记录丢失");
+      const registeredRevision = Number(eventTask?.registration?.scheduleRevision);
+      const valid = eventTask?.state === "active" && eventTask.eventTaskId === event.timerId &&
+        eventTask.trigger?.kind === "timer" && registeredRevision === Number(event.scheduleRevision);
+      if (!valid) {
+        const receipt = createEventReceipt(event.eventId, "timer.fired", {
+          state: eventTask?.state === "needs-user" ? "needs-user" : "ignored", timerId: event.timerId,
+          occurredAt: event.occurredAt, scheduledAt: event.scheduledAt,
+          reason: !eventTask ? "EDT 记录不存在" : eventTask.state !== "active"
+            ? `EDT 状态为 ${eventTask.state}` : "计时计划修订已变化",
+        }, item.value.receivedAt || Date.now());
+        pending = "timer-event-settled";
+        return action("data.batch", { operations: [
+          record(COLLECTION, eventReceiptKey(event.eventId), receipt),
+          { op: "delete", collection: "inbox", key: item.key, expectedRevision: item.revision },
+        ] });
+      }
+      return createTimerTriggeredOst(event, eventTask, item);
+    }
+    case "timer-event-settled": return readNextQueuedGoal();
+    case "timer-trigger-created": return {
+      state: "event-start-pending", eventId: state.pendingEventStartFor,
+      goalId: state.goalId, progress: state.progress,
+    };
     case "event-task-control-receipt-read": {
       const receipt = result?.value;
       const control = pendingEventTaskControl;
@@ -1630,6 +1798,7 @@ globalThis.onHaminnEvent = event => {
   try {
     if (event?.type === "worker.queue-drained") return continueAfterWorkerQueueDrain();
     if (event?.type === "notification.posted") return acceptNotificationEvent(event);
+    if (event?.type === "timer.fired") return acceptTimerEvent(event);
     if (event?.type === "event-task.control") return beginEventTaskControl(event);
     if (event?.type === "event.acknowledged") {
       if (state?.state !== "event-start-pending" || state.pendingEventStartFor !== event.eventId) {
@@ -1637,10 +1806,14 @@ globalThis.onHaminnEvent = event => {
       }
       state.state = "active";
       state.pendingEventStartFor = null;
-      state.progress = "通知事件已持久确认，开始本次 OST。";
+      state.progress = state.triggerContext?.kind === "timer"
+        ? "计时事件已持久确认，开始本次 OST。"
+        : "通知事件已持久确认，开始本次 OST。";
       startupNeedsQueueDrain = false;
       controlNeedsQueueDrain = false;
-      appendTrace("event-task.ost-started", { sourceEventId: event.eventId, ostId: state.goalId });
+      appendTrace("event-task.ost-started", { sourceEventId: event.eventId,
+        sourceKind: state.triggerContext?.kind || "notification", missedCount: state.triggerContext?.missedCount || 0,
+        ostId: state.goalId });
       return beginObserve();
     }
     if (event?.type === "goal.submit") {

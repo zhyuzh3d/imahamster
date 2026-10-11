@@ -491,6 +491,14 @@ JS 测试适合纯状态与组装；QuickJS/Android 仪器测试负责真实模�
 - Registry 现在用明确的 `GLOBAL_GRANT_REVISION` 常量表达现有存储语义，订阅枚举和投递前复核统一检查该全局授权修订。通知仪器测试现验证精确包订阅、稳定事件 ID、重复投递去重、私有 notification key 不外泄，以及撤销授权后停止新投递。
 - 同一批 API 37 AVD 仪器测试还发现 WorkerHostService 两个队列优先级断言把 JUnit 的消息参数写进了实际值位置；修正断言调用顺序后通过。`WorkerRuntimeTest`、`WorkerHostServiceTest`、`NativeHttpBodyInstrumentedTest`、`NotificationEventRouterTest` 合计 12/12 通过，覆盖 80 次工具调用续跑、控制队列、进程服务恢复、HTTP 读正文时取消和通知路由。该结果是 Android 虚拟设备宿主证据，不替代 CMA-AN00 真机和微信行为验收；手机的 ADB / Haminn 前台通道仍未恢复。
 
+### 10.22 持久计时 EDT 与定时事件交付（2026-10-11）
+
+- U4 首个计时闭环已实现：Haminn Worker Bridge 增加 `timers.schedule/cancel/status`；SQLite 持久化一次性、固定间隔和设备本地每周日历计时。系统 AlarmManager 只调度 Worker 事件，不发布用户通知；重复计划重启后重建，时区或系统时间变化后重算。错过的多个间隔合并成一条事件并保留 `missedCount`；事件队列满时保留原 due 状态并延后重试，撤销 `workers.run` 后取消计划和待执行计时事件。
+- HO 将 timer EDT 与通知 EDT 分开接入：计划先登记并保存宿主 schedule revision；`timer.fired` 先幂等落入本地 Inbox，再按有效 EDT 修订创建独立 OST。一次性 EDT 在触发后完成，重复 EDT 保持 active；每个触发 OST 使用自己的 30 分钟截止时间。暂停/恢复/取消共用已持久化的控制事件，恢复时沿用原计划。
+- 新增 HO 端到端测试覆盖重复计时事件、漏过次数、幂等重投、独立 OST、EDT 持续启用，以及暂停/恢复/取消后的旧修订事件隔离。ImHamster 全量 Node 测试 76/76 通过。Haminn 合同校验、`:app:testDebugUnitTest`、主代码与 Android 仪器测试编译通过；API 37 AVD 上 `WorkerTimerScheduleInstrumentedTest` 的 7/7 项通过。
+- 真机验收前的通用容错复查发现：不精确 Alarm 已把 timer 事件持久入队、但 Android 暂时拒绝后台启动 WorkerHostService 时，一次性计时器已消费且没有后续唤醒。Haminn 现在把“启用 Worker 的持久队列仍未被活动 Worker 接管”纳入共享 alarm 重建，5 分钟后重新唤醒；设备启动和 Haminn 更新后会从持久启用列表恢复 Worker，明确停止/撤销授权的 Worker 不会自动重启。一次性重试由 DB 中队列事实驱动，不复制事件或创建额外 OST。该补强已通过 AVD 定时仪器测试；具体锁屏、进程回收和重启后的真实 OEM 行为仍待 CMA-AN00 验证。
+- ImHamster DEV watcher 仍存活，最近观测服务修订为 955（版本 `0.1.37 / code 38`），runtime 为 `not-visible`。macOS USB 树识别 CMA-AN00，但 ADB 重启后仍只枚举 AVD，`192.168.124.29:5555` 也拒绝连接，因此无法更新手机 Haminn APK、启动 DEV happ 或做真机 timer/微信验收。已请用户确认手机 USB 调试和 RSA 授权；HaminnApp 工作树保留未提交代码，待真机验证后再决定宿主提交与推送。
+
 ## 11. 交付与完成判定
 
 ImHamster 与 Haminn 独立提交、验证和推送；每次提交前核对各自 Git 根与 origin，保留无关工作区改动。宿主新增合同需同步 SDK/能力文档/实际实现，消费者只接入确实支持的能力。

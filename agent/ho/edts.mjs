@@ -4,8 +4,14 @@ export function normalizeEventTaskPlan(plan) {
   if (!plan || plan.taskType === undefined || plan.taskType === "one-shot") return null;
   if (plan.taskType !== "event-driven") throw new TypeError("任务类型必须是 one-shot 或 event-driven");
   const trigger = plan.trigger;
+  if (trigger?.kind === "timer") {
+    const schedule = normalizeTimerSchedule(trigger.schedule);
+    const description = String(trigger.description || "").trim();
+    if (!description || description.length > 1000) throw new TypeError("事件任务缺少有效的计时触发说明");
+    return { kind: "timer", schedule, description };
+  }
   if (trigger?.kind !== "notification") {
-    throw new TypeError("当前事件任务需要一个受支持的通知触发条件");
+    throw new TypeError("当前事件任务需要一个受支持的通知或计时触发条件");
   }
   const sourcePackages = Array.isArray(trigger.sourcePackages)
     ? [...new Set(trigger.sourcePackages.map(value => String(value || "").trim()))]
@@ -17,6 +23,41 @@ export function normalizeEventTaskPlan(plan) {
   const description = String(trigger.description || "").trim();
   if (!description || description.length > 1000) throw new TypeError("事件任务缺少有效的触发说明");
   return { kind: "notification", sourcePackages, description };
+}
+
+function normalizeTimerSchedule(schedule) {
+  if (!schedule || typeof schedule !== "object" || Array.isArray(schedule)) {
+    throw new TypeError("计时事件任务缺少 schedule 对象");
+  }
+  if (schedule.kind === "once") {
+    const at = Number(schedule.at);
+    if (!Number.isSafeInteger(at) || at <= 0) throw new TypeError("一次性计时必须提供 epoch 毫秒 at");
+    return { kind: "once", at };
+  }
+  if (schedule.kind === "interval") {
+    const intervalMs = Number(schedule.intervalMs);
+    const firstAt = schedule.firstAt === undefined ? undefined : Number(schedule.firstAt);
+    if (!Number.isSafeInteger(intervalMs) || intervalMs < 60_000 || intervalMs > 365 * 24 * 60 * 60_000 ||
+        (firstAt !== undefined && (!Number.isSafeInteger(firstAt) || firstAt <= 0))) {
+      throw new TypeError("固定间隔计时参数无效");
+    }
+    return { kind: "interval", intervalMs, ...(firstAt === undefined ? {} : { firstAt }) };
+  }
+  if (schedule.kind === "calendar") {
+    const daysOfWeek = Array.isArray(schedule.daysOfWeek)
+      ? [...new Set(schedule.daysOfWeek.map(Number))].sort((a, b) => a - b) : [];
+    const hour = Number(schedule.hour);
+    const minute = Number(schedule.minute);
+    const firstAt = schedule.firstAt === undefined ? undefined : Number(schedule.firstAt);
+    if (!daysOfWeek.length || daysOfWeek.length !== schedule.daysOfWeek.length || daysOfWeek.some(day =>
+      !Number.isInteger(day) || day < 1 || day > 7) || !Number.isInteger(hour) || hour < 0 || hour > 23 ||
+        !Number.isInteger(minute) || minute < 0 || minute > 59 ||
+        (firstAt !== undefined && (!Number.isSafeInteger(firstAt) || firstAt <= 0))) {
+      throw new TypeError("本地日历计时参数无效");
+    }
+    return { kind: "calendar", daysOfWeek, hour, minute, ...(firstAt === undefined ? {} : { firstAt }) };
+  }
+  throw new TypeError("不支持的计时触发类型");
 }
 
 export function createEventTask({ eventTaskId, goalId, taskId, runId, intent, trigger, at = Date.now() }) {
@@ -93,6 +134,33 @@ export function sanitizeNotificationEvent(event) {
 
 export function notificationInboxKey(eventId) {
   return `n:${eventReceiptKey(assertEventId(eventId)).slice("event:".length)}`;
+}
+
+export function timerInboxKey(eventId) {
+  return `t:${eventReceiptKey(assertEventId(eventId)).slice("event:".length)}`;
+}
+
+export function sanitizeTimerEvent(event) {
+  if (!event || event.type !== "timer.fired") throw new TypeError("计时事件类型无效");
+  const eventId = assertEventId(event.eventId);
+  const timerId = String(event.timerId || "");
+  const scheduledAt = Number(event.scheduledAt);
+  const occurredAt = Number(event.occurredAt);
+  const missedCount = Number(event.missedCount || 0);
+  const scheduleRevision = Number(event.scheduleRevision);
+  if (!timerId || timerId.length > 128 || !Number.isSafeInteger(scheduledAt) || scheduledAt <= 0 ||
+      !Number.isSafeInteger(occurredAt) || occurredAt <= 0 || !Number.isSafeInteger(missedCount) || missedCount < 0 ||
+      !Number.isSafeInteger(scheduleRevision) || scheduleRevision < 1) throw new TypeError("计时事件元信息无效");
+  const identity = event.sourceIdentity && typeof event.sourceIdentity === "object" ? event.sourceIdentity : {};
+  return {
+    type: "timer.fired", eventId, timerId, scheduledAt, occurredAt,
+    missedCount: Math.min(missedCount, 1_000_000), scheduleRevision,
+    sourceIdentity: {
+      releaseId: identity.releaseId == null ? null : String(identity.releaseId).slice(0, 128),
+      devRevision: identity.devRevision != null && Number.isSafeInteger(Number(identity.devRevision)) ? Number(identity.devRevision) : null,
+      trustRevision: identity.trustRevision != null && Number.isSafeInteger(Number(identity.trustRevision)) ? Number(identity.trustRevision) : null,
+    },
+  };
 }
 
 export function parseEventMatchDecision(value) {

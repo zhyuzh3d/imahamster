@@ -39,6 +39,9 @@ export function buildActionContext(state, {
   const goalRemainingMinutes = Number.isFinite(deadlineAt)
     ? Math.max(0, Math.ceil((deadlineAt - now) / 60_000))
     : 0;
+  const trigger = state.triggerContext?.kind === "timer"
+    ? `定时触发上下文：计划时刻 epoch=${Number(state.triggerContext.scheduledAt) || 0}，实际交付 epoch=${Number(state.triggerContext.occurredAt) || 0}，合并的遗漏次数=${Number(state.triggerContext.missedCount) || 0}。这是 EDT 当前触发的单次 OST，请依据原始用户目标和这些时间事实处理。`
+    : "";
   const priorLoops = (state.actionLoopHistory || []).slice(-6).map(item => ({
     index: item.index,
     status: item.status,
@@ -63,5 +66,5 @@ export function buildActionContext(state, {
     ? `最近执行错误：${state.lastModelErrorCode ? `${state.lastModelErrorCode}：` : ""}${state.lastModelError}。`
     : "";
 
-  return `当前 OST：${state.intent}\n任务进度：${state.progress || "尚未开始"}；决策步数 ${state.step || 0}；当前 AL ${actionLoop.index || 1}，已用 ${Math.floor(actionLoopElapsedMs / 60_000)} 分钟/预算 ${actionLoop.budgetMinutes || defaultActionLoopBudgetMinutes} 分钟；OST 硬时限剩余 ${goalRemainingMinutes} 分钟。${lastError}${inputRecovery}${operation}\n${loopHistory}近期操作记录：${JSON.stringify(history)}\n${behaviorPatterns}\n${experiences}\n${tools}`;
+  return `当前 OST：${state.intent}\n任务进度：${state.progress || "尚未开始"}；决策步数 ${state.step || 0}；当前 AL ${actionLoop.index || 1}，已用 ${Math.floor(actionLoopElapsedMs / 60_000)} 分钟/预算 ${actionLoop.budgetMinutes || defaultActionLoopBudgetMinutes} 分钟；OST 硬时限剩余 ${goalRemainingMinutes} 分钟。${trigger}${lastError}${inputRecovery}${operation}\n${loopHistory}近期操作记录：${JSON.stringify(history)}\n${behaviorPatterns}\n${experiences}\n${tools}`;
 }

@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { eventReceiptKey } from "./ho/events.mjs";
-import { notificationInboxKey } from "./ho/edts.mjs";
+import { notificationInboxKey, timerInboxKey } from "./ho/edts.mjs";
 import "./worker.mjs";
 
 function modelCall(params, decide, options = {}) {
@@ -81,7 +81,7 @@ test("background goal persists progress and completes across screenshot cycles",
 
   function deliver(event) {
     let output = globalThis.onHaminnEvent(event);
-    for (let turn = 0; output?.actions?.length && turn < 32; turn += 1) {
+    for (let turn = 0; output?.actions?.length && turn < 80; turn += 1) {
       assert.equal(output.actions.length, 1);
       const call = output.actions[0];
       try {
@@ -231,6 +231,208 @@ test("an EDT notification is deduplicated, matched by the LLM, and creates one s
   assert.ok(Number.isFinite(hostDeadlines[2]), "the triggered OST carries its own host deadline");
   assert.equal(records.get("agent-runtime:active-goal").value.sourceEventId, eventId);
   assert.equal(records.get(`event-tasks:ed:${eventTask.eventTaskId}`).value.state, "active");
+});
+
+test("a recurring timer EDT persists each trigger as a separate OST and remains active", () => {
+  const records = new Map();
+  const provider = { baseUrl: "https://model.example", apiKey: "x".repeat(24), model: "vision-model" };
+  const hostDeadlines = [];
+  const schedule = { kind: "interval", intervalMs: 60_000, firstAt: Date.now() + 60_000 };
+  let captures = 0;
+  let timerSchedules = 0;
+  const modelPrompts = [];
+
+  function tool(method, params) {
+    if (method === "data.batch") {
+      for (const operation of params.operations) {
+        const key = `${operation.collection}:${operation.key}`;
+        if (operation.op === "delete") records.delete(key);
+        else records.set(key, { value: operation.value,
+          revision: String(Number(records.get(key)?.revision || 0) + 1) });
+      }
+      return { results: [] };
+    }
+    if (method === "data.put") {
+      records.set(`${params.collection}:${params.key}`, { value: params.value, revision: "1" });
+      return { revision: "1" };
+    }
+    if (method === "data.get") {
+      if (params.collection === "screen-interaction" && params.key === "provider") return { value: provider };
+      return records.get(`${params.collection}:${params.key}`) || null;
+    }
+    if (method === "data.scan") return { items: [...records.entries()]
+      .filter(([key]) => key.startsWith(`${params.collection}:${params.prefix}`))
+      .sort(([a], [b]) => a.localeCompare(b)).slice(0, params.limit)
+      .map(([key, item]) => ({ key: key.slice(params.collection.length + 1), ...item })) };
+    if (method === "timers.schedule") {
+      timerSchedules += 1;
+      return { ready: true, state: "scheduled", timerId: params.timerId, schedule: params.schedule,
+        nextDueAt: params.schedule.firstAt, scheduleRevision: 1, precision: "system-managed" };
+    }
+    if (method === "timers.cancel") return { ready: true, state: "cancelled", timerId: params.timerId };
+    if (method === "interaction.capture") {
+      captures += 1;
+      return { mime: "image/jpeg", width: 1, height: 1, dataBase64: "c3ludGhldGljLWZyYW1l" };
+    }
+    if (method === "network.request") {
+      hostDeadlines.push(params.__haminnWorkerDeadlineAt);
+      const body = JSON.parse(params.bodyText);
+      const prompt = body.messages?.map(message => typeof message.content === "string" ? message.content
+        : message.content?.map?.(part => part.text || "").join(" ")).join("\n") || "";
+      modelPrompts.push(prompt);
+      let content;
+      if (prompt.includes("用户语义指令")) content = { taskType: "event-driven", trigger: {
+        kind: "timer", description: "每分钟执行一次测试任务", schedule,
+      } };
+      else if (prompt.includes("在本 AL 开始任何屏幕动作前")) {
+        content = { estimatedMinutes: 2, budgetMinutes: 15, strategy: "观察当前页面后完成本次工作" };
+      } else if (prompt.includes("判断是否值得保存经验")) content = { saveExperience: false, savePattern: false, saveTool: false };
+      else content = { state: "done", evidence: "本次计时触发的 OST 已完成" };
+      return { status: 200, bodyText: JSON.stringify({ choices: [{ message: { content: JSON.stringify(content) } }] }) };
+    }
+    if (method === "worker.wait") return { waitedMs: params.ms };
+    throw new Error(`Unexpected tool: ${method}`);
+  }
+
+  function deliver(event) {
+    let output = globalThis.onHaminnEvent(event);
+    for (let turn = 0; output?.actions?.length && turn < 80; turn += 1) {
+      assert.equal(output.actions.length, 1);
+      const call = output.actions[0];
+      output = globalThis.onHaminnEvent({ type: "tool.result", callId: call.callId, ok: true,
+        result: tool(call.method, call.params) });
+    }
+    return output;
+  }
+
+  assert.equal(deliver({ type: "start" }).state, "idle");
+  assert.equal(deliver({ type: "goal.submit", intent: "每分钟检查当前页面并完成符合条件的工作",
+    eventId: "timer-edt-submit" }).state, "event-driven");
+  const eventTask = [...records.entries()].find(([key]) => key.startsWith("event-tasks:ed:"))[1].value;
+  assert.equal(eventTask.state, "active");
+  assert.deepEqual(eventTask.trigger.schedule, schedule);
+  assert.equal(timerSchedules, 1);
+
+  const scheduledAt = schedule.firstAt;
+  const eventId = `worker-timer:${eventTask.eventTaskId}:1:${scheduledAt}`;
+  const timerEvent = { type: "timer.fired", eventId, timerId: eventTask.eventTaskId,
+    scheduledAt, occurredAt: scheduledAt + 45_000, missedCount: 3, scheduleRevision: 1,
+    sourceIdentity: { releaseId: "release-test", devRevision: null, trustRevision: 2 } };
+  const started = deliver(timerEvent);
+  assert.equal(started.state, "event-start-pending");
+  const firstOst = records.get("agent-runtime:active-goal").value;
+  assert.equal(firstOst.taskType, "one-shot");
+  assert.equal(firstOst.parentEventTaskId, eventTask.eventTaskId);
+  assert.equal(firstOst.triggerContext.missedCount, 3);
+  assert.equal(records.get(`agent-runtime:${eventReceiptKey(eventId)}`).value.state, "triggered");
+  assert.equal(records.has(`inbox:${timerInboxKey(eventId)}`), false);
+  assert.equal(records.get(`event-tasks:ed:${eventTask.eventTaskId}`).value.state, "active");
+  assert.doesNotMatch(modelPrompts.join("\n"), /指定 EDT 的触发条件/,
+    "a timer is a deterministic trigger and does not need notification semantic matching");
+  assert.equal(deliver(timerEvent).duplicate, true);
+  assert.equal(timerSchedules, 1);
+
+  assert.equal(deliver({ type: "event.acknowledged", eventId }).state, "done");
+  assert.ok(captures >= 1);
+  assert.ok(Number.isFinite(hostDeadlines.find(Number.isFinite)), "the triggered OST receives its own deadline");
+  assert.equal(records.get("agent-runtime:active-goal").value.sourceEventId, eventId);
+  assert.equal(records.get(`event-tasks:ed:${eventTask.eventTaskId}`).value.state, "active",
+    "completing one timer-triggered OST leaves the recurring EDT enabled");
+});
+
+test("timer EDT pause, resume and cancel fence off events from an older schedule revision", () => {
+  const records = new Map();
+  const eventTask = {
+    schemaVersion: 1, eventTaskId: "edt-timer-control", goalId: "g-edt-timer-control",
+    taskId: "t-edt-timer-control", runId: "run-edt-timer-control", intent: "每分钟检查并整理页面",
+    trigger: { kind: "timer", description: "每分钟", schedule: { kind: "interval", intervalMs: 60_000, firstAt: 180_000_000_000 } },
+    state: "active", revision: 2, createdAt: 10, updatedAt: 10, missedNotifications: 0,
+    journalSequence: 0, registration: { state: "scheduled", scheduleRevision: 1 },
+  };
+  const active = { goalId: eventTask.goalId, taskId: eventTask.taskId, runId: eventTask.runId,
+    intent: eventTask.intent, state: "event-driven", taskType: "event-driven", taskKind: "EDT",
+    eventTaskId: eventTask.eventTaskId, progress: "事件任务已启用", createdAt: 10, revision: 2 };
+  records.set("agent-runtime:active-goal", { value: active, revision: "1" });
+  records.set(`event-tasks:ed:${eventTask.eventTaskId}`, { value: eventTask, revision: "1" });
+  const sideEffects = [];
+  let nextScheduleRevision = 1;
+
+  function tool(method, params) {
+    if (method === "data.batch") {
+      for (const operation of params.operations) {
+        const key = `${operation.collection}:${operation.key}`;
+        if (operation.op === "delete") records.delete(key);
+        else records.set(key, { value: operation.value,
+          revision: String(Number(records.get(key)?.revision || 0) + 1) });
+      }
+      return { results: [] };
+    }
+    if (method === "data.put") {
+      records.set(`${params.collection}:${params.key}`, { value: params.value, revision: "1" });
+      return { revision: "1" };
+    }
+    if (method === "data.get") return records.get(`${params.collection}:${params.key}`) || null;
+    if (method === "data.scan") return { items: [...records.entries()]
+      .filter(([key]) => key.startsWith(`${params.collection}:${params.prefix}`))
+      .sort(([a], [b]) => a.localeCompare(b)).slice(0, params.limit)
+      .map(([key, item]) => ({ key: key.slice(params.collection.length + 1), ...item })) };
+    if (method === "timers.cancel") {
+      sideEffects.push(method);
+      return { ready: true, state: "cancelled", timerId: params.timerId };
+    }
+    if (method === "timers.schedule") {
+      sideEffects.push(method);
+      nextScheduleRevision += 1;
+      return { ready: true, state: "scheduled", timerId: params.timerId, schedule: params.schedule,
+        nextDueAt: params.schedule.firstAt, scheduleRevision: nextScheduleRevision, precision: "system-managed" };
+    }
+    if (method === "interaction.capture" || method === "network.request") {
+      throw new Error("paused or stale timer must not start screen work");
+    }
+    if (method === "worker.wait") return { waitedMs: params.ms };
+    throw new Error(`Unexpected tool: ${method}`);
+  }
+
+  function deliver(event) {
+    let output = globalThis.onHaminnEvent(event);
+    for (let turn = 0; output?.actions?.length && turn < 80; turn += 1) {
+      assert.equal(output.actions.length, 1);
+      const call = output.actions[0];
+      output = globalThis.onHaminnEvent({ type: "tool.result", callId: call.callId, ok: true,
+        result: tool(call.method, call.params) });
+    }
+    return output;
+  }
+
+  assert.equal(deliver({ type: "start" }).state, "event-driven");
+  const pauseId = "timer-control-pause";
+  assert.equal(deliver({ type: "event-task.control", eventId: pauseId,
+    eventTaskId: eventTask.eventTaskId, command: "pause" }).controlApplied, true);
+  assert.equal(records.get(`event-tasks:ed:${eventTask.eventTaskId}`).value.state, "paused");
+  assert.deepEqual(sideEffects, ["timers.cancel"]);
+
+  const resumeId = "timer-control-resume";
+  assert.equal(deliver({ type: "event-task.control", eventId: resumeId,
+    eventTaskId: eventTask.eventTaskId, command: "resume" }).controlApplied, true);
+  const resumed = records.get(`event-tasks:ed:${eventTask.eventTaskId}`).value;
+  assert.equal(resumed.state, "active");
+  assert.equal(resumed.registration.scheduleRevision, 2);
+
+  const scheduledAt = eventTask.trigger.schedule.firstAt;
+  const staleEventId = `worker-timer:${eventTask.eventTaskId}:1:${scheduledAt}`;
+  const stale = { type: "timer.fired", eventId: staleEventId, timerId: eventTask.eventTaskId,
+    scheduledAt, occurredAt: scheduledAt + 1000, missedCount: 0, scheduleRevision: 1 };
+  assert.equal(deliver(stale).state, "event-driven");
+  assert.equal(records.get(`agent-runtime:${eventReceiptKey(staleEventId)}`).value.state, "ignored");
+  assert.equal(records.has(`inbox:${timerInboxKey(staleEventId)}`), false);
+  assert.equal(records.get(`event-tasks:ed:${eventTask.eventTaskId}`).value.state, "active");
+  assert.equal(deliver(stale).duplicate, true);
+
+  const cancelId = "timer-control-cancel";
+  assert.equal(deliver({ type: "event-task.control", eventId: cancelId,
+    eventTaskId: eventTask.eventTaskId, command: "cancel" }).controlApplied, true);
+  assert.equal(records.get(`event-tasks:ed:${eventTask.eventTaskId}`).value.state, "cancelled");
+  assert.deepEqual(sideEffects, ["timers.cancel", "timers.schedule", "timers.cancel"]);
 });
 
 test("EDT controls persist before subscription effects, recover auth, and deduplicate completed commands", () => {
