@@ -476,8 +476,14 @@ JS 测试适合纯状态与组装；QuickJS/Android 仪器测试负责真实模�
 
 - 通用缺陷：HO 原先只在下一次 Worker 状态推进时检查 30 分钟 OST 截止点；如果 Bridge 正在执行模型 HTTP 或屏幕效果，宿主不知道这个绝对期限。ImHamster 请求 timeout 也不能覆盖 Haminn 的 HTTP 5 秒最小超时。
 - ImHamster 现在为活动 OST 的 Worker effect 附带内部绝对截止时间元数据。Haminn WorkerHost 在送入 capability 前剥除该字段，只对网络/屏幕外部效果建立单调时钟超时和独立 watchdog；网络 watchdog 会取消该 Worker session 的 OkHttp owner。到期以 `E_TIMEOUT` 返回原 Worker，HO 走既有 30 分钟失败保存路径；`data.*` 持久化不受截止门阻断，以便如实记录失败和未决操作。
-- ImHamster 新增宿主超时返回后的 HO 集成用例，并验证 EDT 分类/匹配没有单次期限，而触发出的 OST 会单独携带期限；全量 Node 测试为 71/71 通过。Haminn watchdog 取消网络 owner 后会保留 tombstone 到当前请求注销，再清除取消标记，避免用户新建重试时同一 Worker session 的网络永久锁死。Haminn 新增剩余时间纯函数单测，但本机当前没有可用 Java Runtime，Gradle 测试、Kotlin 编译和 instrumentation 编译均未运行；ADB 也未枚举设备，因此该宿主改动尚未部署/真机验证。Haminn 工作树中的源文件保持未提交。
+- ImHamster 新增宿主超时返回后的 HO 集成用例，并验证 EDT 分类/匹配没有单次期限，而触发出的 OST 会单独携带期限；全量 Node 测试为 71/71 通过。Haminn watchdog 取消网络 owner 后会保留 tombstone 到当前请求注销，再清除取消标记，避免用户新建重试时同一 Worker session 的网络永久锁死。Haminn 新增剩余时间纯函数单测；使用 Homebrew JDK 17 后，`:app:testDebugUnitTest`、`:app:compileDebugKotlin`、`:app:compileDebugAndroidTestKotlin` 均已通过。宿主更新脚本因 ADB 没有任何设备而停止，Haminn 工作树中的源文件保持未提交，仍未安装/真机验证。
 - 这是 U1 的 effect deadline 子项，不等同于非阻塞 job、优先控制抢占、跨进程 OST watchdog 或宿主事件循环解耦完成。`closeAll` 可取消网络 owner；Android 已经开始执行的系统输入动作不能撤回，仍须把回执视为可能未知并由 HO/LLM 复盘。
+
+### 10.20 EDT 控制对活动子 OST 的抢占入口（2026-10-11）
+
+- 源码检查发现：通知事件一旦触发 one-shot 子 OST，EDT 的 pause/cancel 仍会高优先级入宿主持久队列，但 UI 只在主状态仍为 idle `event-driven` 时先停止 Worker。若子 OST 正卡在模型或屏幕 effect，用户控制要等整段 AL/OST 结束才生效。
+- 现在只对匹配父 EDT 的活动子 OST，在显式 pause/cancel 前先 stop 当前 Worker，再投递同一持久控制事件并重启。Worker 启动路径先 drain 高优先级控制，再恢复检查点；子 OST 会从未决操作上下文恢复。resume 未来触发时不会打断当前子 OST；无关 EDT 和终态子 OST 也不会被停止。状态匹配规则在 HO 纯函数中测试。
+- HO 纯函数与集成相关路径已通过全量 Node 72/72；ImHamster 0.1.37/code 38 的 DEV 源码在服务端提交为修订 931，读回 `agent/worker.mjs` 与 `app.js` 均含本次改动标记。watcher 状态为 alive，但 `targetReady=false`，服务端 `runtime=not-visible`，页面刷新失败，所以这些只是设备树同步证据，没有运行时行为证据。宿主 APK 更新脚本因零台 ADB 设备退出。U1 的运行中异步 job 与原生 watchdog 仍需进一步完善。
 
 ## 11. 交付与完成判定
 

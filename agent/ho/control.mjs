@@ -13,6 +13,14 @@ function isTerminal(state) {
   return ["done", "cancelled"].includes(state);
 }
 
+export function shouldFenceWorkerForEventTaskControl(active, eventTaskId, command) {
+  const id = String(eventTaskId || "");
+  if (!active || !id) return false;
+  if (active.state === "event-driven" && active.eventTaskId === id) return true;
+  return ["pause", "cancel"].includes(command) && active.parentEventTaskId === id &&
+    !["done", "failed", "cancelled"].includes(active.state);
+}
+
 function put(collection, key, value, expectedRevision) {
   return { op: "put", collection, key, value, expectedRevision };
 }

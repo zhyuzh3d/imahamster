@@ -1037,9 +1037,10 @@
     if (startWorker) {
       const current = await readWorkerTaskState();
       const active = current.active?.value;
-      if (current.serviceState === "running" && active?.state === "event-driven" &&
-          active.eventTaskId === eventTaskId) {
-        // Fence an idle EDT before accepting its control so an already queued notification cannot start another OST.
+      hoControlModule ||= import("./agent/ho/control.mjs");
+      const { shouldFenceWorkerForEventTaskControl } = await hoControlModule;
+      if (current.serviceState === "running" && shouldFenceWorkerForEventTaskControl(active, eventTaskId, command)) {
+        // Stop the matching EDT or its active child OST so startup applies the durable control before resuming work.
         await stopWorkerAndWait();
       }
     }

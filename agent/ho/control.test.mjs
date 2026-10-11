@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { applyUserControl } from "./control.mjs";
+import { applyUserControl, shouldFenceWorkerForEventTaskControl } from "./control.mjs";
 
 class MemoryData {
   constructor(entries = []) {
@@ -103,4 +103,15 @@ test("manual retry after the OST hard deadline starts a fresh bounded attempt", 
   assert.equal(active.attempt, 2);
   assert.equal(active.recoveryAttempts, 0);
   assert.equal((await data.get({ collection: "agent-events", key: "e:g1:0000000001" })).value.retryAfterGoalTimeLimit, true);
+});
+
+test("EDT pause and cancel fence only the matching active triggered OST before queueing control", () => {
+  const child = { state: "active", taskKind: "OST", parentEventTaskId: "edt-1" };
+  assert.equal(shouldFenceWorkerForEventTaskControl(child, "edt-1", "pause"), true);
+  assert.equal(shouldFenceWorkerForEventTaskControl(child, "edt-1", "cancel"), true);
+  assert.equal(shouldFenceWorkerForEventTaskControl(child, "edt-1", "resume"), false,
+    "resuming future triggers must not interrupt the current OST");
+  assert.equal(shouldFenceWorkerForEventTaskControl(child, "edt-2", "cancel"), false);
+  assert.equal(shouldFenceWorkerForEventTaskControl({ ...child, state: "done" }, "edt-1", "cancel"), false);
+  assert.equal(shouldFenceWorkerForEventTaskControl({ state: "event-driven", eventTaskId: "edt-1" }, "edt-1", "pause"), true);
 });
