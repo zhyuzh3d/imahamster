@@ -629,6 +629,15 @@ JS 测试适合纯状态与组装；QuickJS/Android 仪器测试负责真实模�
 - 新增单测验证 revision 收集、CAS 注入、显式条件保留和错误 Host 结果处理；Worker 集成测试覆盖 CAS 冲突后在 Task-done 边界继续调度、为下一 Task 读取并附加 CAS，以及迟到结果记日志后恢复原活动 effect 的方法/参数。全量 `node --test` 139/139 通过，Worker/模块/入口语法检查及 `git diff --check` 通过。DEV 树已同步至 revision 1288，但 `targetReady=false`、runtime `not-visible`；ADB 仍只显示 `emulator-5554`，本节没有真机行为验收证据。
 - 当前 CAS 范围仍不包括 `event-tasks` 等 EDT 记录；EDT 的事件 receipt/任务状态冲突需要按事件 ID 幂等规则单独恢复，不能把它们直接归并到活动 OST 重载逻辑。
 
+### 10.43 EDT revision 跟踪、冲突恢复与事件重放（2026-10-11）
+
+- 将 `event-tasks:ed:*` 纳入同一 Host revision ledger；EDT 新建记录明确以 `expectedRevision=absent` 创建，更新用最近一次确认的 Host revision 写入。EDT 控制和订阅完成的 CAS 冲突按各自事件回执与最新 EDT/Goal/Task/active-goal 记录恢复，不盲目重放旧批次，也不重复已经返回结果的原生订阅或计时副作用。若更新期间另一触发已启动新的 OST，恢复会保留该 OST，只更新对应 EDT 及其 Goal/Task。
+- 通知/计时匹配或触发建立批次发生冲突后，Worker 清除过期内存快照并从持久 inbox 重新扫描；即使被冲突的批次只包含事件回执和 inbox 删除、没有生命周期行，也进入这条恢复路径。事件任务登记冲突则保留原始用户意图，检查当前活动状态后继续登记、排队或恢复创建。
+- 恢复路径共同清理失败批次退回的日志快照。测试发现，若特殊 EDT 恢复先于通用日志清理执行，日志适配器会把当前活动记录附加进下一批次，可能覆盖并发产生的新 OST；清理现已前移到所有冲突分支之前，并以并发 OST 注入测试验证订阅登记与控制恢复不会覆盖当前目标。EDT 登记结果也独立写入任务事件日志，即使其完成时当前活动记录已属于另一 OST，仍可追查最终登记/授权状态。
+- CAS 恢复次数只在恢复链仍连续失败时累加，成功的生命周期写入、事件 inbox 结算或控制回执恢复会清零，避免多个彼此独立且最终成功的通知冲突累计耗尽同一 Worker 的恢复额度。
+- 新增集成测试覆盖 EDT subscription/control CAS 冲突及原生副作用不重放、并发 OST 保留、连续多个已恢复的存储冲突、取消 EDT 的通知结算冲突后从 durable inbox 重扫。全量 `node --test` 142/142 通过，Worker 与 revision 模块语法检查及 `git diff --check` 通过。DEV watcher 仍运行并针对本目录同步；本机 `adb devices -l` 仍只列出 `emulator-5554`，本节没有手机运行或微信行为验收证据。
+- `agent-runtime:event:*` receipt 的多 Worker 并发写入仍需另行评估其 revision/idempotency 合同；本节不把所有 event receipt 都宣称为 CAS 完成。
+
 ## 11. 交付与完成判定
 
 ImHamster 与 Haminn 独立提交、验证和推送；每次提交前核对各自 Git 根与 origin，保留无关工作区改动。宿主新增合同需同步 SDK/能力文档/实际实现，消费者只接入确实支持的能力。

@@ -25,6 +25,13 @@ test("known lifecycle revisions are attached to writes without overriding explic
   assert.equal(hasLifecycleWrite("data.put", { collection: "agent-runtime", key: "active-goal" }), true);
   assert.equal(hasLifecycleWrite("data.put", { collection: "agent-runtime", key: "event:receipt" }), false);
   assert.equal(hasLifecycleWrite("data.put", { collection: "knowledge", key: "memory:1" }), false);
+
+  observeStoreEffectResult(revisions, "data.get", { collection: "event-tasks", key: "ed:edt-1" },
+    { revision: "edt-r1", value: {} });
+  assert.equal(prepareRevisionCheckedWrite("data.put", {
+    collection: "event-tasks", key: "ed:edt-1", value: {},
+  }, revisions).expectedRevision, "edt-r1");
+  assert.equal(hasLifecycleWrite("data.put", { collection: "event-tasks", key: "ed:edt-1" }), true);
 });
 
 test("batch writes receive known revisions while preserving non-lifecycle and explicit operations", () => {

@@ -17,7 +17,7 @@ function persistMockBatch(records, params) {
   params.operations.forEach((operation, index) => {
     const key = `${operation.collection}:${operation.key}`;
     if (operation.op === "delete") records.delete(key);
-    else records.set(key, { value: operation.value, revision: result.results[index].revision });
+    else records.set(key, { value: structuredClone(operation.value), revision: result.results[index].revision });
   });
   return result;
 }
@@ -1100,6 +1100,235 @@ test("EDT controls persist before subscription effects, recover auth, and dedupl
   assert.equal(records.get("tasks:t:t-edt-control").value.state, "waiting");
   assert.equal(records.get(`agent-runtime:${eventReceiptKey(authorizedResume.eventId)}`).value.resultState, "active");
   assert.equal(sideEffects.filter(method => method === "notifications.subscribe").length, 2);
+});
+
+test("an EDT control CAS recovery reloads active-goal and cannot overwrite a concurrently started OST", () => {
+  const records = new Map();
+  const eventTask = {
+    schemaVersion: 1, eventTaskId: "edt-control-cas", goalId: "g-edt-control-cas", taskId: "t-edt-control-cas",
+    runId: "run-edt-control-cas", intent: "符合条件时处理新消息", trigger: {
+      kind: "notification", sourcePackages: ["com.tencent.mm"], description: "收到新消息",
+    }, state: "active", revision: 2, createdAt: 10, updatedAt: 10, missedNotifications: 0, journalSequence: 0,
+  };
+  const active = { goalId: eventTask.goalId, taskId: eventTask.taskId, runId: eventTask.runId,
+    intent: eventTask.intent, state: "event-driven", taskType: "event-driven", taskKind: "EDT",
+    eventTaskId: eventTask.eventTaskId, progress: "事件任务已启用", createdAt: 10, revision: 2 };
+  records.set("agent-runtime:active-goal", { value: active, revision: "active-r1" });
+  records.set(`event-tasks:ed:${eventTask.eventTaskId}`, { value: eventTask, revision: "edt-r1" });
+  let conflictOnce = true;
+  let sideEffectCount = 0;
+  let retryOperations = null;
+
+  function tool(method, params) {
+    if (method === "data.batch") {
+      const hasControlFinalWrite = params.operations.some(operation => operation.collection === "goals") &&
+        params.operations.some(operation => operation.collection === "event-tasks") &&
+        params.operations.some(operation => operation.collection === "agent-runtime" && operation.key === "active-goal");
+      if (hasControlFinalWrite && conflictOnce) {
+        conflictOnce = false;
+        const concurrentlyStartedOst = { goalId: "g-new-ost", taskId: "t-new-ost", runId: "run-new-ost",
+          intent: "新通知触发的单次目标", state: "active", taskType: "one-shot", taskKind: "OST", revision: 1 };
+        records.set("agent-runtime:active-goal", { value: concurrentlyStartedOst, revision: "active-r2" });
+        return { __toolError: { code: "E_CONFLICT", message: "active-goal revision changed" } };
+      }
+      if (params.operations.some(operation => operation.collection === "event-tasks") &&
+          params.operations.some(operation => operation.collection === "goals")) retryOperations = params.operations;
+      return persistMockBatch(records, params);
+    }
+    if (method === "data.put") {
+      const revision = `put-r${Number(records.get(`${params.collection}:${params.key}`)?.revision?.slice(5) || 0) + 1}`;
+      records.set(`${params.collection}:${params.key}`, { value: params.value, revision });
+      return { revision };
+    }
+    if (method === "data.get") return records.get(`${params.collection}:${params.key}`) || null;
+    if (method === "data.scan") return { items: [] };
+    if (method === "notifications.unsubscribe") {
+      sideEffectCount += 1;
+      return { ready: true, state: "unsubscribed", subscriptionId: params.subscriptionId, removed: 1 };
+    }
+    throw new Error(`Unexpected tool: ${method}`);
+  }
+
+  function deliver(event) {
+    let output = globalThis.onHaminnEvent(event);
+    for (let turn = 0; output?.actions?.length && turn < 80; turn += 1) {
+      assert.equal(output.actions.length, 1);
+      const call = output.actions[0];
+      const result = tool(call.method, call.params);
+      output = result?.__toolError
+        ? globalThis.onHaminnEvent({ type: "tool.result", callId: call.callId, ok: false, error: result.__toolError })
+        : globalThis.onHaminnEvent({ type: "tool.result", callId: call.callId, ok: true, result });
+    }
+    return output;
+  }
+
+  assert.equal(deliver({ type: "start" }).state, "event-driven");
+  const command = { type: "event-task.control", eventId: "edt-control-cas-pause",
+    eventTaskId: eventTask.eventTaskId, command: "pause" };
+  const result = deliver(command);
+  assert.equal(result.controlApplied, true);
+  assert.equal(sideEffectCount, 1, "a persisted prepared control must not replay its native effect during final-save recovery");
+  assert.equal(records.get("agent-runtime:active-goal").value.goalId, "g-new-ost");
+  assert.equal(records.get(`event-tasks:ed:${eventTask.eventTaskId}`).value.state, "paused");
+  assert.ok(retryOperations);
+  assert.equal(retryOperations.some(operation => operation.collection === "agent-runtime" && operation.key === "active-goal"),
+    false, "the refreshed active OST must be excluded from the EDT control write set");
+});
+
+test("an EDT registration CAS recovery preserves a newer active OST while saving the subscription receipt", () => {
+  const records = new Map();
+  const provider = { baseUrl: "https://model.example", apiKey: "x".repeat(24), model: "vision-model" };
+  let subscriptionReturned = false;
+  let conflictOnce = true;
+  let retryOperations = null;
+  let activeGoalReads = 0;
+
+  function tool(method, params) {
+    if (method === "data.batch") {
+      const statusWrite = subscriptionReturned && params.operations.some(operation => operation.collection === "event-tasks") &&
+        params.operations.some(operation => operation.collection === "agent-runtime" && operation.key === "active-goal");
+      if (statusWrite && conflictOnce) {
+        conflictOnce = false;
+        const concurrentlyStartedOst = { goalId: "g-subscription-ost", taskId: "t-subscription-ost", runId: "run-subscription-ost",
+          intent: "新通知触发的单次目标", state: "active", taskType: "one-shot", taskKind: "OST", revision: 1 };
+        records.set("agent-runtime:active-goal", { value: concurrentlyStartedOst, revision: "active-r2" });
+        return { __toolError: { code: "E_CONFLICT", message: "active-goal revision changed" } };
+      }
+      if (subscriptionReturned && params.operations.some(operation => operation.collection === "event-tasks")) retryOperations = params.operations;
+      return persistMockBatch(records, params);
+    }
+    if (method === "data.put") {
+      const revision = `put-r${Number(records.get(`${params.collection}:${params.key}`)?.revision?.slice(5) || 0) + 1}`;
+      records.set(`${params.collection}:${params.key}`, { value: params.value, revision });
+      return { revision };
+    }
+    if (method === "data.get") {
+      if (params.collection === "screen-interaction" && params.key === "provider") return { value: provider };
+      if (params.collection === "agent-runtime" && params.key === "active-goal") activeGoalReads += 1;
+      return records.get(`${params.collection}:${params.key}`) || null;
+    }
+    if (method === "data.scan") return { items: [] };
+    if (method === "notifications.subscribe") {
+      subscriptionReturned = true;
+      return { ready: true, state: "subscribed", subscriptionId: params.subscriptionId, listenerAccess: true };
+    }
+    if (method === "network.request") {
+      const body = JSON.parse(params.bodyText);
+      const prompt = body.messages?.map(message => typeof message.content === "string" ? message.content
+        : message.content?.map?.(part => part.text || "").join(" ")).join("\n") || "";
+      const content = prompt.includes("用户语义指令") ? { taskType: "event-driven", trigger: {
+        kind: "notification", sourcePackages: ["com.tencent.mm"], description: "收到微信消息",
+      } } : { estimatedMinutes: 2, budgetMinutes: 15, strategy: "登记通知并按每次触发启动 OST" };
+      return { status: 200, bodyText: JSON.stringify({ choices: [{ message: { content: JSON.stringify(content) } }] }) };
+    }
+    throw new Error(`Unexpected tool: ${method}`);
+  }
+
+  function deliver(event) {
+    let output = globalThis.onHaminnEvent(event);
+    for (let turn = 0; output?.actions?.length && turn < 80; turn += 1) {
+      assert.equal(output.actions.length, 1);
+      const call = output.actions[0];
+      const result = tool(call.method, call.params);
+      output = result?.__toolError
+        ? globalThis.onHaminnEvent({ type: "tool.result", callId: call.callId, ok: false, error: result.__toolError })
+        : globalThis.onHaminnEvent({ type: "tool.result", callId: call.callId, ok: true, result });
+    }
+    return output;
+  }
+
+  assert.equal(deliver({ type: "start" }).state, "idle");
+  const result = deliver({ type: "goal.submit", eventId: "edt-subscription-cas-submit",
+    intent: "微信收到新消息时根据上下文回复" });
+  assert.equal(result.state, "event-driven");
+  const eventTask = [...records.entries()].find(([key]) => key.startsWith("event-tasks:ed:"))[1].value;
+  assert.equal(eventTask.state, "active");
+  assert.ok([...records.entries()].some(([key, value]) => key.startsWith(`agent-events:e:${eventTask.goalId}:`) &&
+    value.value.phase === "event-task.registration-completed"), "the EDT outcome must remain auditable after recovery");
+  assert.notEqual(eventTask.goalId, "g-subscription-ost");
+  assert.equal(records.get("agent-runtime:active-goal").value.goalId, "g-subscription-ost");
+  assert.ok(retryOperations);
+  assert.ok(activeGoalReads >= 2, "recovery must reload the current active goal after the EDT status conflict");
+  assert.equal(retryOperations.some(operation => operation.collection === "agent-runtime" && operation.key === "active-goal"),
+    false, "the subscription retry must preserve the newly started OST");
+});
+
+test("an EDT inbox settlement CAS conflict replays the durable event after clearing stale snapshots", () => {
+  const records = new Map();
+  const eventTask = {
+    schemaVersion: 1, eventTaskId: "edt-inbox-cas", goalId: "g-edt-inbox-cas", taskId: "t-edt-inbox-cas",
+    runId: "run-edt-inbox-cas", intent: "收到通知时只处理指定联系人", trigger: {
+      kind: "notification", sourcePackages: ["com.tencent.mm"], description: "处理微信通知",
+    }, state: "cancelled", revision: 3, createdAt: 10, updatedAt: 20, missedNotifications: 0, journalSequence: 0,
+  };
+  const active = { goalId: eventTask.goalId, taskId: eventTask.taskId, runId: eventTask.runId,
+    intent: eventTask.intent, state: "event-driven", taskType: "event-driven", taskKind: "EDT",
+    eventTaskId: eventTask.eventTaskId, progress: "事件任务已取消", createdAt: 10, revision: 3 };
+  records.set("agent-runtime:active-goal", { value: active, revision: "active-r1" });
+  records.set(`event-tasks:ed:${eventTask.eventTaskId}`, { value: eventTask, revision: "edt-r1" });
+  const eventIds = Array.from({ length: 4 }, (_, index) => `notification:cancelled-cas-event-${index + 1}`);
+  const inboxKeys = new Map(eventIds.map(eventId => [notificationInboxKey(eventId), eventId]));
+  eventIds.forEach((eventId, index) => records.set(`inbox:${notificationInboxKey(eventId)}`, { value: {
+    type: "notification.posted", eventId, subscriptionId: eventTask.eventTaskId,
+    sourcePackage: "com.tencent.mm", occurredAt: 1_800_000_000_000 + index,
+    receivedAt: 1_800_000_000_001 + index,
+    notification: { title: "zhyuzh", text: "合成通知，取消后不应触发" }, state: "received",
+  }, revision: `inbox-r${index + 1}` }));
+  const conflictedEventIds = new Set();
+  let settlementAttempts = 0;
+  let modelCalls = 0;
+
+  function tool(method, params) {
+    if (method === "data.batch") {
+      const settlement = params.operations.find(operation => operation.collection === "inbox" &&
+        inboxKeys.has(operation.key) && operation.op === "delete");
+      if (settlement) {
+        settlementAttempts += 1;
+        const eventId = inboxKeys.get(settlement.key);
+        if (!conflictedEventIds.has(eventId)) {
+          conflictedEventIds.add(eventId);
+          return { __toolError: { code: "E_CONFLICT", message: "inbox revision changed" } };
+        }
+      }
+      return persistMockBatch(records, params);
+    }
+    if (method === "data.put") {
+      const revision = `put-r${Number(records.get(`${params.collection}:${params.key}`)?.revision?.slice(5) || 0) + 1}`;
+      records.set(`${params.collection}:${params.key}`, { value: structuredClone(params.value), revision });
+      return { revision };
+    }
+    if (method === "data.get") return records.get(`${params.collection}:${params.key}`) || null;
+    if (method === "data.scan") {
+      return { items: [...records.entries()].filter(([key]) => key.startsWith(`${params.collection}:${params.prefix}`))
+        .sort(([left], [right]) => left.localeCompare(right)).slice(0, params.limit)
+        .map(([key, value]) => ({ key: key.slice(params.collection.length + 1), ...value })) };
+    }
+    if (method === "network.request") { modelCalls += 1; throw new Error("取消的 EDT 不应调用模型"); }
+    throw new Error(`Unexpected tool: ${method}`);
+  }
+
+  function deliver(event) {
+    let output = globalThis.onHaminnEvent(event);
+    for (let turn = 0; output?.actions?.length && turn < 80; turn += 1) {
+      assert.equal(output.actions.length, 1);
+      const call = output.actions[0];
+      const result = tool(call.method, call.params);
+      output = result?.__toolError
+        ? globalThis.onHaminnEvent({ type: "tool.result", callId: call.callId, ok: false, error: result.__toolError })
+        : globalThis.onHaminnEvent({ type: "tool.result", callId: call.callId, ok: true, result });
+    }
+    return output;
+  }
+
+  assert.equal(deliver({ type: "start" }).state, "event-driven");
+  const drained = deliver({ type: "worker.queue-drained" });
+  assert.equal(drained.state, "event-driven");
+  assert.equal(settlementAttempts, 8, "each conflict must rescan and settle its durable notification exactly once");
+  for (const eventId of eventIds) {
+    assert.equal(records.get(`agent-runtime:${eventReceiptKey(eventId)}`).value.state, "ignored");
+    assert.equal(records.has(`inbox:${notificationInboxKey(eventId)}`), false);
+  }
+  assert.equal(modelCalls, 0);
 });
 
 test("a queued EDT cancellation is applied before startup drains old notifications", () => {

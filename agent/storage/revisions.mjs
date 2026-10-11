@@ -1,4 +1,4 @@
-const LIFECYCLE_COLLECTIONS = new Set(["agent-runtime", "goals", "tasks"]);
+const LIFECYCLE_COLLECTIONS = new Set(["agent-runtime", "goals", "tasks", "event-tasks"]);
 
 function recordKey(collection, key) {
   return `${collection}\u0000${key}`;
@@ -6,7 +6,9 @@ function recordKey(collection, key) {
 
 function isTracked(collection, key) {
   if (typeof key !== "string" || !key) return false;
-  return collection === "agent-runtime" ? key === "active-goal" : LIFECYCLE_COLLECTIONS.has(collection);
+  if (collection === "agent-runtime") return key === "active-goal";
+  if (collection === "event-tasks") return key.startsWith("ed:");
+  return LIFECYCLE_COLLECTIONS.has(collection);
 }
 
 function hasRevision(record) {

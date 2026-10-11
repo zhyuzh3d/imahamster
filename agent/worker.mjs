@@ -64,6 +64,9 @@ const NOTIFICATION_INBOX_PREFIX = "n:";
 const MAX_RECOVERY_ATTEMPTS = 12;
 const MAX_POST_TASK_QUEUE_RECOVERY_ATTEMPTS = 8;
 const MAX_STORAGE_CONFLICT_RECOVERIES = 3;
+const EVENT_INBOX_REPLAY_STAGES = new Set([
+  "event-match-settled", "event-match-trigger-created", "timer-event-settled", "timer-trigger-created",
+]);
 const DEFAULT_ACTION_LOOP_BUDGET_MINUTES = 15;
 const MAX_ACTION_LOOP_BUDGET_MINUTES = 30;
 const MAX_GOAL_DURATION_MS = 30 * 60_000;
@@ -76,6 +79,12 @@ const CRITICAL_STATE_READ_STAGES = new Set([
   "load-active", "load-active-goal-plan", "load-active-task-plan",
   "storage-conflict-active-read", "storage-conflict-goal-read", "storage-conflict-task-read",
   "task-handoff-target-read",
+  "storage-conflict-registration-read", "event-task-control-conflict-receipt-read",
+  "event-task-control-conflict-record-read", "event-task-control-conflict-goal-read",
+  "event-task-control-conflict-task-read", "event-task-control-conflict-active-read",
+  "event-task-subscription-conflict-task-read",
+  "event-task-subscription-conflict-goal-read",
+  "event-task-subscription-conflict-task-record-read", "event-task-subscription-conflict-active-read",
   "goal-submit-receipt-read", "notification-receipt-read", "timer-receipt-read",
   "event-task-control-receipt-read", "event-task-control-task-read",
   "goal-control-receipt-read", "goal-control-active-read", "goal-control-goal-read", "goal-control-task-read",
@@ -115,6 +124,7 @@ let pendingNotificationRecord = null;
 let pendingTimerEvent = null;
 let pendingTimerRecord = null;
 let pendingEventTaskRecord = null;
+let pendingEventTaskSubscriptionRecovery = null;
 let pendingEventTaskControl = null;
 let pendingGoalControl = null;
 let startupNeedsQueueDrain = false;
@@ -252,29 +262,113 @@ function workerPersistenceFailure(error, stage) {
 }
 
 function beginStorageConflictRecovery(error, method, failedStage) {
+  const stage = String(failedStage || "unknown");
   storageConflictAttempts += 1;
   if (storageConflictAttempts > MAX_STORAGE_CONFLICT_RECOVERIES) {
-    throw workerPersistenceFailure(error, `${failedStage}（CAS 冲突恢复 ${storageConflictAttempts - 1} 次后仍失败）`);
+    throw workerPersistenceFailure(error, `${stage}（CAS 冲突恢复 ${storageConflictAttempts - 1} 次后仍失败）`);
   }
 
   storageConflictContext = {
-    stage: String(failedStage || "unknown").slice(0, 80),
+    stage: stage.slice(0, 80),
     method,
     attempts: storageConflictAttempts,
     code: String(error?.code || "E_CONFLICT").slice(0, 48),
   };
-  // The batch was rejected atomically. Its uncommitted trace entries belong to
-  // the stale snapshot, so replace them with one conflict record after reload.
+  // The failed write returned its journal entries to the pending queue. Every
+  // recovery route must discard that stale snapshot before it can issue a new
+  // batch, otherwise journal attachment may checkpoint an unrelated active OST.
   journalPending = [];
   journalInFlight = [];
   journalCommitCallId = null;
+  if (stage.startsWith("event-task-control-") && pendingEventTaskControl) {
+    storageConflictContext.kind = "event-task-control";
+    pending = "event-task-control-conflict-receipt-read";
+    return action("data.get", { collection: COLLECTION,
+      key: eventReceiptKey(pendingEventTaskControl.eventId) });
+  }
+  if (stage === "event-task-status-saved" && pendingEventTaskSubscriptionRecovery) {
+    storageConflictContext.kind = "event-task-subscription";
+    pending = "event-task-subscription-conflict-task-read";
+    return action("data.get", { collection: EVENT_TASKS_COLLECTION,
+      key: `ed:${pendingEventTaskSubscriptionRecovery.eventTask.eventTaskId}` });
+  }
+  if (stage === "event-task-prepared" && pendingEventTaskRecord) {
+    storageConflictContext.kind = "event-task-registration";
+    storageConflictContext.eventTaskId = pendingEventTaskRecord.eventTaskId;
+    storageConflictContext.goalId = pendingEventTaskRecord.goalId;
+    storageConflictContext.intent = pendingEventTaskRecord.intent;
+    storageConflictContext.trigger = pendingEventTaskRecord.trigger;
+  } else if (EVENT_INBOX_REPLAY_STAGES.has(stage)) {
+    storageConflictContext.kind = "event-inbox-replay";
+    // Inbox records are durable. Clear stale in-memory snapshots so recovery
+    // can scan and reconstruct the event after reloading the active OST.
+    pendingNotificationRecord = null;
+    pendingTimerRecord = null;
+    pendingEventTaskRecord = null;
+    pendingNotificationEvent = null;
+    pendingTimerEvent = null;
+  }
+
+  // The batch was rejected atomically. Its uncommitted trace entries belong to
+  // the stale snapshot, so replace them with one conflict record after reload.
   state = null;
   pending = "storage-conflict-active-read";
   return action("data.get", { collection: COLLECTION, key: ACTIVE_KEY });
 }
 
+function restartGoalAfterStorageConflict(intent) {
+  storageConflictContext = null;
+  pendingEventTaskRecord = null;
+  pendingGoalSubmit = null;
+  const operations = makeGoalAndTask(intent);
+  state.runId = operations[1].value.runId;
+  appendTrace("goal.accepted", { intentLength: intent.length, source: "storage-conflict-recovery" });
+  pending = "create-goal";
+  return action("data.batch", { operations });
+}
+
+function continueEventTaskRegistrationRecovery(context) {
+  if (state?.goalId === context.goalId) {
+    if (state.state === "event-driven") {
+      storageConflictContext = null;
+      pending = "storage-conflict-registration-read";
+      return action("data.get", { collection: EVENT_TASKS_COLLECTION, key: `ed:${context.eventTaskId}` });
+    }
+    if (state.state === "paused" || state.state === "waiting") {
+      storageConflictContext = null;
+      pendingEventTaskRecord = null;
+      return { state: state.state, progress: state.progress, storageConflictRecovered: true };
+    }
+    if (terminal(state.state)) return restartGoalAfterStorageConflict(context.intent);
+    if (!context.recordsLoaded) {
+      pending = "storage-conflict-goal-read";
+      return action("data.get", { collection: "goals", key: `g:${state.goalId}` });
+    }
+    storageConflictContext = null;
+    return registerEventTask(context.trigger);
+  }
+  if (state && !["done", "failed", "cancelled"].includes(state.state)) {
+    storageConflictContext = null;
+    pendingEventTaskRecord = null;
+    return enqueueGoal(context.intent);
+  }
+  return restartGoalAfterStorageConflict(context.intent);
+}
+
 function continueAfterStorageConflict() {
   const context = storageConflictContext;
+  if (context?.kind === "event-task-registration") return continueEventTaskRegistrationRecovery(context);
+  if (context?.kind === "event-inbox-replay") {
+    pendingEventTaskRecord = null;
+    pendingNotificationRecord = null;
+    pendingTimerRecord = null;
+    pendingNotificationEvent = null;
+    pendingTimerEvent = null;
+    if (!state || terminal(state.state) || state.taskType === "event-driven") {
+      storageConflictContext = null;
+      return readNextQueuedGoal();
+    }
+  }
   storageConflictContext = null;
   if (!state) {
     return { state: "conflict", retryable: true, storageConflict: context,
@@ -294,8 +388,9 @@ function continueAfterStorageConflict() {
   return action("data.get", { collection: "goals", key: `g:${state.goalId}` });
 }
 
-function record(collection, key, value) {
-  return { op: "put", collection, key, value };
+function record(collection, key, value, expectedRevision) {
+  return { op: "put", collection, key, value,
+    ...(expectedRevision === undefined ? {} : { expectedRevision }) };
 }
 
 function appendTrace(phase, fields = {}) {
@@ -545,8 +640,8 @@ function makeGoalAndTask(intent, eventId = null) {
   state.taskPlan = taskPlanFromRecord(task);
   state.taskRecordKind = task.kind;
   const operations = [
-    record("goals", `g:${state.goalId}`, goal),
-    record("tasks", `t:${state.taskId}`, task),
+    record("goals", `g:${state.goalId}`, goal, "absent"),
+    record("tasks", `t:${state.taskId}`, task, "absent"),
     record(COLLECTION, ACTIVE_KEY, state),
   ];
   if (eventId) operations.push(record(COLLECTION, eventReceiptKey(eventId), createEventReceipt(eventId, "goal.submit", {
@@ -698,7 +793,7 @@ function continueAfterGoalControl() {
     receipt: control?.receipt || null };
 }
 
-function eventTaskControlJournal(eventTask, phase, fields = {}) {
+function eventTaskJournal(eventTask, phase, fields = {}) {
   const sequence = Number(eventTask.journalSequence || 0) + 1;
   eventTask.journalSequence = sequence;
   const entry = makeJournalEntry({ goalId: eventTask.goalId, taskId: eventTask.taskId, runId: eventTask.runId }, sequence, {
@@ -762,6 +857,7 @@ function saveEventTaskControlResult(result) {
   const control = pendingEventTaskControl;
   const eventTask = control?.eventTask;
   if (!control || !eventTask) throw new Error("事件任务控制回执缺少任务");
+  control.effectResult = result;
   const isTimer = eventTask.trigger.kind === "timer";
   const ready = result?.ready === true && (control.command === "resume"
     ? result?.state === (isTimer ? "scheduled" : "subscribed")
@@ -792,7 +888,7 @@ function saveEventTaskControlResult(result) {
     eventTask.pendingClarification = null;
     eventTask.lastQuestion = null;
   }
-  const journal = eventTaskControlJournal(eventTask, `event-task.${control.command}-completed`, {
+  const journal = eventTaskJournal(eventTask, `event-task.${control.command}-completed`, {
     resultState: finalState, ready, replyLength: control.reply.length,
   });
   const receipt = { ...(control.receipt || createEventReceipt(control.eventId, "event-task.control")),
@@ -845,6 +941,7 @@ function saveEventTaskControlTransition(eventTask) {
   const control = pendingEventTaskControl;
   if (!control) throw new Error("事件任务控制上下文已丢失");
   const now = Date.now();
+  control.previousControlEventId = eventTask.lastControlEventId || null;
   control.previousState = eventTask.state;
   const transition = transitionEventTask(eventTask, control.command, now);
   if (!transition.changed) {
@@ -865,7 +962,7 @@ function saveEventTaskControlTransition(eventTask) {
   control.receipt = { ...(control.receipt || createEventReceipt(control.eventId, "event-task.control")),
     eventId: control.eventId, type: "event-task.control", state: "prepared", eventTaskId: control.eventTaskId,
     command: control.command, replyLength: control.reply.length, preparedAt: now };
-  const journal = eventTaskControlJournal(next, `event-task.${control.command}-started`, {
+  const journal = eventTaskJournal(next, `event-task.${control.command}-started`, {
     fromState: eventTask.state, toState: next.state,
   });
   pending = "event-task-control-prepared";
@@ -880,6 +977,45 @@ function continueAfterEventTaskControl() {
   pendingEventTaskControl = null;
   controlNeedsQueueDrain = true;
   return { state: state?.state || "idle", controlApplied: true };
+}
+
+function saveSupersededEventTaskControl(eventTask) {
+  const control = pendingEventTaskControl;
+  if (!control) throw new Error("已被覆盖的事件任务控制缺少回执上下文");
+  control.receipt = { ...(control.receipt || createEventReceipt(control.eventId, "event-task.control")),
+    eventId: control.eventId, type: "event-task.control", state: "retryable-error",
+    eventTaskId: control.eventTaskId, command: control.command,
+    error: "此控制已被较新的事件任务控制取代；请按当前状态重试。",
+    supersededByEventId: String(eventTask?.lastControlEventId || "").slice(0, 160), updatedAt: Date.now() };
+  pending = "event-task-control-failure-saved";
+  return action("data.put", { collection: COLLECTION, key: eventReceiptKey(control.eventId), value: control.receipt });
+}
+
+function continueAfterEventTaskControlConflict() {
+  const context = storageConflictContext;
+  const control = pendingEventTaskControl;
+  const eventTask = control?.eventTask;
+  storageConflictContext = null;
+  if (!control || !eventTask) throw new Error("事件任务 CAS 恢复上下文已经丢失");
+
+  if (context?.stage === "event-task-control-final-saved") {
+    if (eventTask.lastControlEventId !== control.eventId) return saveSupersededEventTaskControl(eventTask);
+    if (!control.effectResult) return saveEventTaskControlFailure(new Error("控制效果已返回，但恢复时缺少结果；请重试控制。"));
+    return saveEventTaskControlResult(control.effectResult);
+  }
+  if (context?.stage === "event-task-control-failure-saved") {
+    if (eventTask.lastControlEventId !== control.eventId) return saveSupersededEventTaskControl(eventTask);
+    return saveEventTaskControlFailure(new Error(control.receipt?.error || "事件任务控制需要重试。"));
+  }
+  if (context?.stage === "event-task-control-prepared" &&
+      (eventTask.lastControlEventId || null) !== (control.previousControlEventId || null)) {
+    return saveSupersededEventTaskControl(eventTask);
+  }
+  if (context?.stage === "event-task-control-prepared" && control.receipt?.state === "prepared" &&
+      eventTask.lastControlEventId === control.eventId) {
+    return requestEventTaskControlEffect();
+  }
+  return saveEventTaskControlTransition(eventTask);
 }
 
 function continueAfterWorkerQueueDrain() {
@@ -1363,7 +1499,7 @@ function registerEventTask(trigger) {
     waiting: { reason: "等待事件触发", since: now }, resultRefs: [], createdAt: state.createdAt, updatedAt: now };
   pending = "event-task-prepared";
   return action("data.batch", { operations: [
-    record(EVENT_TASKS_COLLECTION, `ed:${eventTask.eventTaskId}`, eventTask),
+    record(EVENT_TASKS_COLLECTION, `ed:${eventTask.eventTaskId}`, eventTask, "absent"),
     record("goals", `g:${state.goalId}`, goal),
     record("tasks", `t:${state.taskId}`, task),
     record(COLLECTION, ACTIVE_KEY, state),
@@ -1422,7 +1558,7 @@ function persistSubtaskPlan(plan) {
   return action("data.batch", { operations: [
     record("goals", `g:${state.goalId}`, goalProgressRecord(state, "active", now)),
     record("tasks", `t:${coordinatorTaskId}`, coordinator),
-    ...graph.tasks.map(task => record("tasks", `t:${task.taskId}`, task)),
+    ...graph.tasks.map(task => record("tasks", `t:${task.taskId}`, task, "absent")),
     record(COLLECTION, ACTIVE_KEY, state),
   ] });
 }
@@ -1444,33 +1580,43 @@ function saveEventTaskSubscriptionResult(result) {
     ...(isTimer ? { nextDueAt: Number(result?.nextDueAt) || null,
       scheduleRevision: Number(result?.scheduleRevision) || null, precision: String(result?.precision || "system-managed") }
       : { listenerAccess: result?.listenerAccess === true }), updatedAt: now };
-  state.state = "event-driven";
-  state.progress = ready ? isTimer ? "事件任务已启用，等待计划时间触发。" : "事件任务已启用，等待符合条件的通知。"
+  const progress = ready ? isTimer ? "事件任务已启用，等待计划时间触发。" : "事件任务已启用，等待符合条件的通知。"
     : isTimer ? "Haminn 未能登记计时任务，请检查 Worker 授权和系统后台运行状态。"
       : result?.state === "needs-system-access"
         ? "需要在 Android 通知使用权设置中允许 Haminn，再继续启用此事件任务。"
         : "需要授予此 happ 的通知读取能力，再继续启用此事件任务。";
-  state.waiting = ready ? null : { category: "notification-authorization", reason: state.progress,
+  const waiting = ready ? null : { category: "notification-authorization", reason: progress,
     userRequired: true, since: now };
-  appendTrace(ready ? "event-task.active" : "event-task.authorization-required", {
-    eventTaskId: eventTask.eventTaskId, state: eventTask.state,
+  const ownsActiveGoal = state?.goalId === eventTask.goalId && state?.eventTaskId === eventTask.eventTaskId &&
+    state?.taskType === "event-driven";
+  if (ownsActiveGoal) {
+    state.state = "event-driven";
+    state.eventTaskState = eventTask.state;
+    state.progress = progress;
+    state.waiting = waiting;
+    state.revision = Number(state.revision || 0) + 1;
+    appendTrace(ready ? "event-task.active" : "event-task.authorization-required", {
+      eventTaskId: eventTask.eventTaskId, state: eventTask.state,
+      listenerAccess: result?.listenerAccess === true,
+    });
+  }
+  eventTask.journalSequence = Math.max(Number(eventTask.journalSequence || 0),
+    Number(ownsActiveGoal ? state.journalSequence || 0 : 0));
+  const journal = eventTaskJournal(eventTask, "event-task.registration-completed", {
+    state: eventTask.state, nativeState: String(result?.state || "unknown"), ready,
     listenerAccess: result?.listenerAccess === true,
   });
-  eventTask.journalSequence = Math.max(Number(eventTask.journalSequence || 0), Number(state.journalSequence || 0));
+  pendingEventTaskSubscriptionRecovery = { eventTask, result };
   pendingEventTaskRecord = null;
   pending = "event-task-status-saved";
-  return action("data.batch", { operations: [
+  const operations = [
     record(EVENT_TASKS_COLLECTION, `ed:${eventTask.eventTaskId}`, eventTask),
-    record("goals", `g:${state.goalId}`, { schemaVersion: 1, goalId: state.goalId,
-      intent: state.intent, taskKind: "EDT", triggers: [eventTask.trigger], completion: "由 LLM 按事件逐次评估并对每次触发建立独立 OST",
-      priority: 0, state: "active", revision: 3, acceptedBoundary: "after-creation",
-      progress: state.progress, createdAt: state.createdAt, updatedAt: now }),
-    record("tasks", `t:${state.taskId}`, { schemaVersion: 1, taskId: state.taskId,
-      goalId: state.goalId, runId: state.runId, revision: 3, kind: "event-monitor",
-      objective: state.intent, state: ready ? "waiting" : "waiting", dependencies: [], objectKey: null,
-      progress: state.progress, waiting: ready ? { reason: "等待事件触发", since: now } : state.waiting,
-      resultRefs: [], createdAt: state.createdAt, updatedAt: now }),
-    record(COLLECTION, ACTIVE_KEY, state),
+    ...eventTaskGoalAndTaskRecords(eventTask),
+    journal,
+  ];
+  if (ownsActiveGoal) operations.push(record(COLLECTION, ACTIVE_KEY, state));
+  return action("data.batch", { operations: [
+    ...operations,
   ] });
 }
 
@@ -1965,6 +2111,10 @@ function advanceAfterTool(event) {
   if (state && !["unclassified", "event-match"].includes(state.taskType) && !terminal(state.state) && !["goal-time-limit-saved", "goal-submit-receipt-read"].includes(pending) && goalDeadlineExpired() &&
       !finishingGlobalActionReceipt && !GLOBAL_ACTION_RECEIPT_STAGES.has(pending)) return failExpiredGoal();
   const result = resultOf(event);
+  if (hasLifecycleWrite(activeCallMethod, activeCallParams) || EVENT_INBOX_REPLAY_STAGES.has(pending) ||
+      (pending === "event-task-control-failure-saved" && activeCallMethod === "data.put")) {
+    storageConflictAttempts = 0;
+  }
   if (POST_TASK_QUEUE_READ_STAGES.has(pending) && state?.postTaskQueueRecovery?.kind === "inbox-drain" &&
       state.postTaskQueueRecovery.state !== "recovered") {
     const recovery = state.postTaskQueueRecovery;
@@ -1985,18 +2135,27 @@ function advanceAfterTool(event) {
   switch (pending) {
     case "storage-conflict-active-read": {
       state = result?.value || null;
-      if (!state) {
-        const conflict = storageConflictContext;
-        storageConflictContext = null;
-        return { state: "conflict", retryable: true, storageConflict: conflict,
-          error: "CAS 冲突后未找到活动 OST；可重新投递原任务。" };
-      }
+      if (!state) return continueAfterStorageConflict();
       if (terminal(state.state) || state.state === "paused" || state.state === "waiting" ||
           ["event-match", "unclassified"].includes(state.taskType) || !state.goalId || !state.taskId) {
         return continueAfterStorageConflict();
       }
       pending = "storage-conflict-goal-read";
       return action("data.get", { collection: "goals", key: `g:${state.goalId}` });
+    }
+    case "storage-conflict-registration-read": {
+      const eventTask = result?.value;
+      if (!eventTask || eventTask.eventTaskId !== state?.eventTaskId) {
+        throw workerPersistenceFailure(Object.assign(new Error("已登记的 EDT 记录在冲突恢复时不存在"), {
+          code: "E_STORAGE",
+        }), pending);
+      }
+      pendingEventTaskRecord = eventTask;
+      if (eventTask.state === "registering") return requestEventTaskSubscription();
+      pendingEventTaskSubscriptionRecovery = null;
+      return { state: "event-driven", eventTaskId: eventTask.eventTaskId,
+        ready: eventTask.state === "active", waiting: eventTask.lastControlError || null,
+        storageConflictRecovered: true };
     }
     case "storage-conflict-goal-read": {
       state.goalPlan = goalPlanFromRecord(result?.value);
@@ -2006,6 +2165,7 @@ function advanceAfterTool(event) {
     case "storage-conflict-task-read": {
       state.taskPlan = taskPlanFromRecord(result?.value);
       state.taskRecordKind = typeof result?.value?.kind === "string" ? result.value.kind : "screen-work";
+      if (storageConflictContext?.kind === "event-task-registration") storageConflictContext.recordsLoaded = true;
       return continueAfterStorageConflict();
     }
     case "storage-conflict-state-saved": {
@@ -2079,10 +2239,11 @@ function advanceAfterTool(event) {
     }
     case "event-task-prepared": return requestEventTaskSubscription();
     case "event-task-subscription": return saveEventTaskSubscriptionResult(result);
-    case "event-task-status-saved": return {
-      state: "event-driven", eventTaskId: state.eventTaskId,
-      ready: state.waiting === null, waiting: state.waiting?.reason || null,
-    };
+    case "event-task-status-saved": {
+      pendingEventTaskSubscriptionRecovery = null;
+      return { state: "event-driven", eventTaskId: state.eventTaskId,
+        ready: state.waiting === null, waiting: state.waiting?.reason || null };
+    }
     case "notification-receipt-read": {
       if (!pendingNotificationEvent) throw new Error("通知回执检查缺少原始事件");
       if (result?.value) {
@@ -2172,6 +2333,58 @@ function advanceAfterTool(event) {
       pending = "event-task-control-task-read";
       return action("data.get", { collection: EVENT_TASKS_COLLECTION, key: `ed:${control.eventTaskId}` });
     }
+    case "event-task-control-conflict-receipt-read": {
+      const control = pendingEventTaskControl;
+      const receipt = result?.value;
+      if (!control) throw new Error("事件任务控制冲突恢复缺少命令");
+      if (receipt) {
+        if (receipt.eventId !== control.eventId || receipt.type !== "event-task.control" ||
+            receipt.command !== control.command || receipt.eventTaskId !== control.eventTaskId) {
+          throw new Error("事件任务控制回执与待恢复命令不匹配");
+        }
+        if (receipt.state === "completed") {
+          pendingEventTaskControl = null;
+          storageConflictContext = null;
+          controlNeedsQueueDrain = true;
+          return { state: receipt.resultState || "completed", duplicate: true,
+            eventTaskId: receipt.eventTaskId, receipt };
+        }
+        if (!["prepared", "retryable-error"].includes(receipt.state)) {
+          throw new Error("事件任务控制回执状态无效，无法安全恢复");
+        }
+        control.receipt = receipt;
+      }
+      pending = "event-task-control-conflict-record-read";
+      return action("data.get", { collection: EVENT_TASKS_COLLECTION, key: `ed:${control.eventTaskId}` });
+    }
+    case "event-task-control-conflict-record-read": {
+      const control = pendingEventTaskControl;
+      const eventTask = result?.value;
+      if (!control || !eventTask || eventTask.eventTaskId !== control.eventTaskId) {
+        throw workerPersistenceFailure(Object.assign(new Error("事件任务控制目标在冲突恢复时不存在"), {
+          code: "E_STORAGE",
+        }), pending);
+      }
+      control.eventTask = eventTask;
+      pending = "event-task-control-conflict-goal-read";
+      return action("data.get", { collection: "goals", key: `g:${eventTask.goalId}` });
+    }
+    case "event-task-control-conflict-goal-read": {
+      if (!pendingEventTaskControl) throw new Error("事件任务控制冲突恢复上下文已经丢失");
+      pendingEventTaskControl.goalRecord = result;
+      pending = "event-task-control-conflict-task-read";
+      return action("data.get", { collection: "tasks", key: `t:${pendingEventTaskControl.eventTask.taskId}` });
+    }
+    case "event-task-control-conflict-task-read": {
+      if (!pendingEventTaskControl) throw new Error("事件任务控制冲突恢复上下文已经丢失");
+      pendingEventTaskControl.taskRecord = result;
+      pending = "event-task-control-conflict-active-read";
+      return action("data.get", { collection: COLLECTION, key: ACTIVE_KEY });
+    }
+    case "event-task-control-conflict-active-read": {
+      state = result?.value || null;
+      return continueAfterEventTaskControlConflict();
+    }
     case "event-task-control-task-read": {
       const control = pendingEventTaskControl;
       const eventTask = result?.value;
@@ -2191,6 +2404,47 @@ function advanceAfterTool(event) {
       controlNeedsQueueDrain = true;
       return { state: "retryable-error", eventTaskId: control?.eventTaskId,
         error: control?.receipt?.error || control?.eventTask?.lastControlError || "事件任务控制未完成，可重试。" };
+    }
+    case "event-task-subscription-conflict-task-read": {
+      const recovery = pendingEventTaskSubscriptionRecovery;
+      const eventTask = result?.value;
+      if (!recovery || !eventTask || eventTask.eventTaskId !== recovery.eventTask.eventTaskId) {
+        throw workerPersistenceFailure(Object.assign(new Error("事件任务在订阅回执冲突恢复时不存在"), {
+          code: "E_STORAGE",
+        }), pending);
+      }
+      recovery.eventTask = eventTask;
+      if (eventTask.state !== "registering") {
+        pendingEventTaskSubscriptionRecovery = null;
+        pendingEventTaskRecord = null;
+        storageConflictContext = null;
+        return { state: "event-driven", eventTaskId: eventTask.eventTaskId,
+          ready: eventTask.state === "active", waiting: eventTask.lastControlError || null,
+          storageConflictRecovered: true };
+      }
+      pending = "event-task-subscription-conflict-goal-read";
+      return action("data.get", { collection: "goals", key: `g:${eventTask.goalId}` });
+    }
+    case "event-task-subscription-conflict-goal-read": {
+      const recovery = pendingEventTaskSubscriptionRecovery;
+      if (!recovery) throw new Error("事件任务订阅冲突恢复上下文已经丢失");
+      recovery.goalRecord = result;
+      pending = "event-task-subscription-conflict-task-record-read";
+      return action("data.get", { collection: "tasks", key: `t:${recovery.eventTask.taskId}` });
+    }
+    case "event-task-subscription-conflict-task-record-read": {
+      const recovery = pendingEventTaskSubscriptionRecovery;
+      if (!recovery) throw new Error("事件任务订阅冲突恢复上下文已经丢失");
+      recovery.taskRecord = result;
+      pending = "event-task-subscription-conflict-active-read";
+      return action("data.get", { collection: COLLECTION, key: ACTIVE_KEY });
+    }
+    case "event-task-subscription-conflict-active-read": {
+      const recovery = pendingEventTaskSubscriptionRecovery;
+      if (!recovery) throw new Error("事件任务订阅冲突恢复上下文已经丢失");
+      state = result?.value || null;
+      pendingEventTaskRecord = recovery.eventTask;
+      return saveEventTaskSubscriptionResult(recovery.result);
     }
     case "event-task-read": {
       const item = pendingNotificationRecord;
@@ -2584,6 +2838,17 @@ globalThis.onHaminnEvent = event => {
       clearLifecycleRevisions(lifecycleRevisions);
       storageConflictAttempts = 0;
       storageConflictContext = null;
+      pendingNotificationEvent = null;
+      pendingNotificationRecord = null;
+      pendingTimerEvent = null;
+      pendingTimerRecord = null;
+      pendingEventTaskRecord = null;
+      pendingEventTaskSubscriptionRecovery = null;
+      pendingEventTaskControl = null;
+      pendingGoalSubmit = null;
+      pendingGoalControl = null;
+      startupNeedsQueueDrain = false;
+      controlNeedsQueueDrain = false;
       suspendedActiveCall = null;
       pending = "load-active";
       return action("data.get", { collection: COLLECTION, key: ACTIVE_KEY });
@@ -2604,7 +2869,7 @@ globalThis.onHaminnEvent = event => {
       failedBridgeMethod = activeCallMethod;
       settleJournalWrite(event);
       if (!event.ok && event.error?.code === "E_CONFLICT" &&
-          hasLifecycleWrite(activeCallMethod, activeCallParams)) {
+          (hasLifecycleWrite(activeCallMethod, activeCallParams) || EVENT_INBOX_REPLAY_STAGES.has(pending))) {
         const failedMethod = activeCallMethod;
         const failedStage = pending;
         activeCallId = null;
