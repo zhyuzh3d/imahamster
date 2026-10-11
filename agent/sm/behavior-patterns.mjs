@@ -12,6 +12,8 @@ function patternValue(item) {
     type: "behavior-pattern",
     state: "active",
     scope: "global",
+    ...(typeof item?.key === "string" && item.key ? { sourceRef: `self-model:${item.key}` } : {}),
+    ...(item?.revision !== undefined ? { recordRevision: String(item.revision).slice(0, 80) } : {}),
     title: value.title.trim().slice(0, 120),
     condition: value.condition.trim().slice(0, 240),
     guidance: value.guidance.trim().slice(0, 500),

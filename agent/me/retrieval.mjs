@@ -17,6 +17,8 @@ function experienceValue(item) {
     schemaVersion: Number(value.schemaVersion) || 1,
     type: "experience",
     state: "active",
+    ...(typeof item?.key === "string" && item.key ? { sourceRef: `knowledge:${item.key}` } : {}),
+    ...(item?.revision !== undefined ? { recordRevision: String(item.revision).slice(0, 80) } : {}),
     ...fields,
     toolRefs,
     ...(Number.isFinite(Number(value.createdAt)) ? { createdAt: Number(value.createdAt) } : {}),

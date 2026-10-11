@@ -3,6 +3,7 @@
 import { buildChatCompletionRequest, classifyProviderStatus, DEFAULT_PROVIDER_TIMEOUT_MS, parseChatCompletionContent, readProviderResponse } from "./llm/provider.mjs";
 import { buildActionContext } from "./cae/context.mjs";
 import { SYSTEM_PROMPT } from "./cae/prompts.mjs";
+import { buildContextManifest } from "./cae/manifest.mjs";
 import { retrieveRelevantExperiences } from "./me/retrieval.mjs";
 import { memorySourceRef, normalizeMemorySuggestion, retrieveMemoriesForObjects, retrieveRelevantMemories } from "./me/memory.mjs";
 import { normalizeBehaviorPattern, retrieveBehaviorPatterns } from "./sm/behavior-patterns.mjs";
@@ -60,6 +61,7 @@ let state = null;
 let provider = null;
 let activeIdentityCore = { content: DEFAULT_IDENTITY_CORE, version: 0 };
 let identityCoreLoaded = false;
+let pendingContextManifest = null;
 let pending = "";
 let callSequence = 0;
 const workerEpoch = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
@@ -80,6 +82,8 @@ let startupNeedsQueueDrain = false;
 let controlNeedsQueueDrain = false;
 
 function requestProvider(purpose, phase, fields, messages, { userAgent = false } = {}) {
+  const contextManifest = pendingContextManifest;
+  pendingContextManifest = null;
   state.providerPurpose = purpose;
   let timeoutMs = DEFAULT_PROVIDER_TIMEOUT_MS;
   if (state && !["event-match", "event-driven"].includes(state.taskType) && !terminal(state.state)) {
@@ -91,7 +95,8 @@ function requestProvider(purpose, phase, fields, messages, { userAgent = false }
     timeoutMs = boundTimeoutToDeadline(state.goalDeadlineAt, timeoutMs);
   }
   const params = buildChatCompletionRequest(provider, messages, { timeoutMs, userAgent });
-  return tracedCall(phase, { ...fields, purpose, model: provider.model }, "network.request", params, "provider-result");
+  return tracedCall(phase, { ...fields, purpose, model: provider.model,
+    ...(contextManifest ? { contextManifest: { ...contextManifest, purpose } } : {}) }, "network.request", params, "provider-result");
 }
 
 function applyProviderText(purpose, text) {
@@ -318,12 +323,17 @@ function contextText() {
       stage: "focus-required", code: priorInputError.code || "E_CONFLICT", attempts: 1, failedAtStep: priorInputError.step,
     };
   }
-  return buildActionContext(state, {
+  const context = buildActionContext(state, {
     now: Date.now(),
     actionLoopElapsedMs: actionLoopElapsedMs(),
     defaultActionLoopBudgetMinutes: DEFAULT_ACTION_LOOP_BUDGET_MINUTES,
     identityCore: state.identityCoreRequested ? activeIdentityCore : null,
   });
+  pendingContextManifest = buildContextManifest(state, {
+    context,
+    identityCore: state.identityCoreRequested ? activeIdentityCore : null,
+  });
+  return context;
 }
 
 function beginActionLoopPlanning(reason = "start") {
@@ -2021,6 +2031,7 @@ globalThis.onHaminnEvent = event => {
     if (event?.type === "start") {
       activeIdentityCore = { content: DEFAULT_IDENTITY_CORE, version: 0 };
       identityCoreLoaded = false;
+      pendingContextManifest = null;
       pending = "load-active";
       return action("data.get", { collection: COLLECTION, key: ACTIVE_KEY });
     }

@@ -169,6 +169,18 @@ test("LLM requests Persona and object Memory only when relevant and HO restores 
     objectRefs: ["contact:张三"], content: "张三喜欢周末徒步", sourceRefs: ["trace:synthetic"], observedAt: 10,
     inference: "observed", tags: ["徒步"], revision: 1,
   }, revision: "1" });
+  records.set("knowledge:experience:reply", { value: {
+    type: "experience", state: "active", title: "结合上下文回复朋友", situation: "微信朋友消息回复",
+    approach: "先观察并核对对象", successEvidence: "目标消息已发送", createdAt: 20,
+  }, revision: "3" });
+  records.set("knowledge:tool-candidate:reply-flow", { value: {
+    type: "tool-candidate", state: "candidate", name: "查看会话再回复",
+    description: "核对会话和最新上下文后回复朋友", toolRefs: ["interaction.capture", "interaction.input"], createdAt: 20,
+  }, revision: "4" });
+  records.set("self-model:bp:reply", { value: {
+    type: "behavior-pattern", state: "active", scope: "global", title: "自然简洁回复",
+    condition: "回复朋友消息", guidance: "自然直接，不复述对方整句", evidence: "已用于成功回复", createdAt: 20,
+  }, revision: "5" });
   records.set("self-model:identity-core", { value: {
     schemaVersion: 1, type: "identity-core", content: "我表达自然直接，也会先理解对方的处境。", version: 2,
   }, revision: "1" });
@@ -254,6 +266,14 @@ test("LLM requests Persona and object Memory only when relevant and HO restores 
   assert.match(actionPrompts[2], /contact:张三/);
   assert.match(actionPrompts[3], /本次 OST 已达到/);
   const saved = records.get("agent-runtime:active-goal").value;
+  const actionRequests = saved.trace.filter(event => event.phase === "model.requested" && event.purpose === "action");
+  const manifest = actionRequests[2]?.contextManifest;
+  assert.equal(manifest?.purpose, "action");
+  assert.deepEqual(manifest?.selected.identityCore, { source: "user", version: 2 });
+  assert.deepEqual(manifest?.selected.memories, [{ ref: "knowledge:memory:contact-zhangsan", revision: "1", recordRevision: "1" }]);
+  assert.deepEqual(manifest?.selected.experiences, [{ ref: "knowledge:experience:reply", recordRevision: "3" }]);
+  assert.deepEqual(manifest?.selected.behaviorPatterns, [{ ref: "self-model:bp:reply", recordRevision: "5" }]);
+  assert.deepEqual(manifest?.selected.toolCandidates, [{ ref: "knowledge:tool-candidate:reply-flow", recordRevision: "4" }]);
   assert.equal(saved.trace.some(event => event.phase === "context.requested" && event.includeIdentityCore), true);
   assert.equal(saved.trace.some(event => event.phase === "memory.context-loaded" && event.memoryCount === 1), true);
   assert.equal(saved.trace.some(event => event.phase === "identity-core.context-loaded" && event.version === 2), true);

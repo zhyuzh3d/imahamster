@@ -526,6 +526,12 @@ JS 测试适合纯状态与组装；QuickJS/Android 仪器测试负责真实模�
 - 新增 `self-model:identity-core` 的 schema、长度限制和递增版本；Persona UI 支持读取默认/用户版本、明确编辑与 CAS 保存。静态执行策略保留在 SYSTEM_PROMPT，用户 IC 以低优先级参考数据组装，不可扩大授权。LLM 可在截图判断任务需要角色表达时请求 IC；HO 限制每个 OST 仅查询一次，记录版本和来源，Worker 重启后恢复该上下文。
 - CAE 测试确认仅显式请求时包含 IC，Worker 集成测试覆盖 IC 与精确对象 Memory 联合查询、查询中断后的恢复和重复请求限制。BP、Memory、IC 仍需真机渲染、用户编辑与下一 OST 上下文证据；U3/U5 与设备验收未完成。
 
+### 10.27 CAE 上下文来源清单（2026-10-11）
+
+- U3 计划要求每次上下文组装留下来源、版本、观察引用、裁剪情况和规模信息。此前模型请求日志只有截图字节数、目的和响应状态，无法追查某次回复实际看到了哪些 ME/SM/TE 条目。
+- 新增 `agent/cae/manifest.mjs`，将最近历史稳定引用、AL 概况、经验/Memory/BP/工具候选来源与 Bridge revision、Identity Core 来源/版本、各类裁剪数量及 context 字符数记录在 `model.requested` 轨迹中；检索条目将内部 sourceRef/recordRevision 保留给清单，但 CAE 只按白名单字段把正文送给模型。清单不复制记忆正文或截图；token 数为明确标注的字符数粗估。
+- CAE 单测和 Worker 集成测试覆盖选择、版本、裁剪及隐私边界。设备日志展示、长上下文裁剪行为和真实供应商 token 用量关联仍待设备验收。
+
 ## 11. 交付与完成判定
 
 ImHamster 与 Haminn 独立提交、验证和推送；每次提交前核对各自 Git 根与 origin，保留无关工作区改动。宿主新增合同需同步 SDK/能力文档/实际实现，消费者只接入确实支持的能力。

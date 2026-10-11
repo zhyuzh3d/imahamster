@@ -81,6 +81,8 @@ function storedMemory(item) {
     tags: uniqueStrings(value.tags, { limit: 12, maxLength: 40 }),
     id: String(value.id || item?.key || "").slice(0, 160),
     revision: Math.max(1, Number(value.revision) || 1),
+    ...(typeof item?.key === "string" && item.key ? { sourceRef: `knowledge:${item.key}` } : {}),
+    ...(item?.revision !== undefined ? { recordRevision: String(item.revision).slice(0, 80) } : {}),
     ...(Number.isFinite(Number(value.createdAt)) ? { createdAt: Number(value.createdAt) } : {}),
   };
 }

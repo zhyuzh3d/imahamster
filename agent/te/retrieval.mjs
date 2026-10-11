@@ -13,6 +13,8 @@ function candidateValue(item) {
     schemaVersion: Number(value.schemaVersion) || 1,
     type: "tool-candidate",
     state: "candidate",
+    ...(typeof item?.key === "string" && item.key ? { sourceRef: `knowledge:${item.key}` } : {}),
+    ...(item?.revision !== undefined ? { recordRevision: String(item.revision).slice(0, 80) } : {}),
     name: value.name.trim().slice(0, 80),
     description: value.description.trim().slice(0, 600),
     toolRefs,
