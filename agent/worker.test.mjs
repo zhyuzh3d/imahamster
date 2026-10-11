@@ -153,6 +153,12 @@ test("background goal persists progress and completes across screenshot cycles",
     "every recorded Worker trace event must be written as an independent record");
   assert.ok(journal.some((event) => event.phase === "model.requested"));
   assert.ok(journal.some((event) => event.phase === "action-loop.started"));
+  const taskPlan = journal.find(event => event.phase === "task.classification-requested");
+  assert.equal(taskPlan?.contextManifest?.purpose, "task-plan");
+  assert.deepEqual(taskPlan?.contextManifest?.selected.sourceRefs, [`task:${active.taskId}:intent`]);
+  const learning = journal.find(event => event.phase === "learning.model-requested");
+  assert.equal(learning?.contextManifest?.purpose, "learning");
+  assert.ok(learning?.contextManifest?.selected.learningTraceRefs.length > 0);
 });
 
 test("LLM requests Persona and object Memory only when relevant and HO restores context after restart", () => {
@@ -369,6 +375,11 @@ test("an EDT notification is deduplicated, matched by the LLM, and creates one s
   assert.equal(active.sourceEventId, eventId);
   assert.equal(records.get(`agent-runtime:${eventReceiptKey(eventId)}`).value.state, "triggered");
   assert.equal(records.has(`inbox:${notificationInboxKey(eventId)}`), false);
+  const matchRequest = [...records.entries()].filter(([key]) => key.startsWith(`agent-events:e:${eventTask.goalId}:`))
+    .map(([, item]) => item.value).find(entry => entry.phase === "event.match-requested");
+  assert.equal(matchRequest?.contextManifest?.purpose, "event-match");
+  assert.deepEqual(matchRequest?.contextManifest?.selected.sourceRefs,
+    [`event-task:${eventTask.eventTaskId}`, `notification:${eventId}`]);
 
   assert.equal(deliver(notification).duplicate, true);
   assert.equal(matchCalls, 1, "redelivery must not build another OST");

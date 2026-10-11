@@ -39,6 +39,7 @@ export function buildContextManifest(state, {
   purpose = "action",
   context = "",
   identityCore = null,
+  selection = null,
 } = {}) {
   if (!state || typeof state !== "object") throw new TypeError("CAE 清单需要有效的 OST 状态");
   const trace = list(state.trace);
@@ -46,6 +47,35 @@ export function buildContextManifest(state, {
   const loops = list(state.actionLoopHistory).slice(-LIMITS.actionLoops);
   const latestObservation = [...trace].reverse().find(event => event?.phase === "screenshot.received");
   const identityVersion = Math.max(0, Number(identityCore?.version) || 0);
+  const selected = selection ? {
+    history: [], actionLoops: [], experiences: [], memories: [], memoryLookupRefs: [],
+    behaviorPatterns: [], toolCandidates: [], identityCore: null,
+    ...selection,
+  } : {
+    history: history.map(event => traceRef(state.goalId, event)).filter(Boolean),
+    actionLoops: loops.map(item => ({ index: Number(item.index) || 0, status: String(item.status || "").slice(0, 40) })),
+    experiences: selectedRecords(state.experiences, LIMITS.experiences, "knowledge"),
+    memories: selectedRecords(state.memories, LIMITS.memories, "knowledge"),
+    memoryLookupRefs: list(state.memoryLookupRefs).slice(0, LIMITS.memoryLookupRefs).map(value => String(value).slice(0, 120)),
+    behaviorPatterns: selectedRecords(state.behaviorPatterns, LIMITS.behaviorPatterns, "self-model"),
+    toolCandidates: selectedRecords(state.toolCandidates, LIMITS.toolCandidates, "knowledge"),
+    identityCore: identityCore?.content ? {
+      source: identityVersion > 0 ? "user" : "package-default",
+      version: identityVersion,
+    } : null,
+  };
+  const omitted = selection ? {
+    history: 0, actionLoops: 0, experiences: 0, memories: 0,
+    memoryLookupRefs: 0, behaviorPatterns: 0, toolCandidates: 0,
+  } : {
+    history: Math.max(0, trace.length - LIMITS.history),
+    actionLoops: Math.max(0, list(state.actionLoopHistory).length - LIMITS.actionLoops),
+    experiences: Math.max(0, list(state.experiences).length - LIMITS.experiences),
+    memories: Math.max(0, list(state.memories).length - LIMITS.memories),
+    memoryLookupRefs: Math.max(0, list(state.memoryLookupRefs).length - LIMITS.memoryLookupRefs),
+    behaviorPatterns: Math.max(0, list(state.behaviorPatterns).length - LIMITS.behaviorPatterns),
+    toolCandidates: Math.max(0, list(state.toolCandidates).length - LIMITS.toolCandidates),
+  };
 
   return {
     schemaVersion: 1,
@@ -61,28 +91,8 @@ export function buildContextManifest(state, {
         height: Number(latestObservation.height) || null,
       },
     } : {}),
-    selected: {
-      history: history.map(event => traceRef(state.goalId, event)).filter(Boolean),
-      actionLoops: loops.map(item => ({ index: Number(item.index) || 0, status: String(item.status || "").slice(0, 40) })),
-      experiences: selectedRecords(state.experiences, LIMITS.experiences, "knowledge"),
-      memories: selectedRecords(state.memories, LIMITS.memories, "knowledge"),
-      memoryLookupRefs: list(state.memoryLookupRefs).slice(0, LIMITS.memoryLookupRefs).map(value => String(value).slice(0, 120)),
-      behaviorPatterns: selectedRecords(state.behaviorPatterns, LIMITS.behaviorPatterns, "self-model"),
-      toolCandidates: selectedRecords(state.toolCandidates, LIMITS.toolCandidates, "knowledge"),
-      identityCore: identityCore?.content ? {
-        source: identityVersion > 0 ? "user" : "package-default",
-        version: identityVersion,
-      } : null,
-    },
-    omitted: {
-      history: Math.max(0, trace.length - LIMITS.history),
-      actionLoops: Math.max(0, list(state.actionLoopHistory).length - LIMITS.actionLoops),
-      experiences: Math.max(0, list(state.experiences).length - LIMITS.experiences),
-      memories: Math.max(0, list(state.memories).length - LIMITS.memories),
-      memoryLookupRefs: Math.max(0, list(state.memoryLookupRefs).length - LIMITS.memoryLookupRefs),
-      behaviorPatterns: Math.max(0, list(state.behaviorPatterns).length - LIMITS.behaviorPatterns),
-      toolCandidates: Math.max(0, list(state.toolCandidates).length - LIMITS.toolCandidates),
-    },
+    selected,
+    omitted,
     contextCharacters: String(context).length,
     approximateContextTokens: Math.ceil(String(context).length / 4),
     tokenEstimate: "ceil(contextCharacters/4)",

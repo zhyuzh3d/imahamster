@@ -529,8 +529,8 @@ JS 测试适合纯状态与组装；QuickJS/Android 仪器测试负责真实模�
 ### 10.27 CAE 上下文来源清单（2026-10-11）
 
 - U3 计划要求每次上下文组装留下来源、版本、观察引用、裁剪情况和规模信息。此前模型请求日志只有截图字节数、目的和响应状态，无法追查某次回复实际看到了哪些 ME/SM/TE 条目。
-- 新增 `agent/cae/manifest.mjs`，将最近历史稳定引用、AL 概况、经验/Memory/BP/工具候选来源与 Bridge revision、Identity Core 来源/版本、各类裁剪数量及 context 字符数记录在 `model.requested` 轨迹中；检索条目将内部 sourceRef/recordRevision 保留给清单，但 CAE 只按白名单字段把正文送给模型。清单不复制记忆正文或截图；token 数为明确标注的字符数粗估。
-- CAE 单测和 Worker 集成测试覆盖选择、版本、裁剪及隐私边界。设备日志展示、长上下文裁剪行为和真实供应商 token 用量关联仍待设备验收。
+- 新增 `agent/cae/manifest.mjs`，将最近历史稳定引用、AL 概况、经验/Memory/BP/工具候选来源与 Bridge revision、Identity Core 来源/版本、各类裁剪数量及 context 字符数记录在模型请求轨迹中；任务分类、AL 计划/复盘、屏幕动作、通知匹配和成功后学习均记录各自实际输入引用。检索条目将内部 sourceRef/recordRevision 保留给清单，但 CAE 只按白名单字段把正文送给模型。清单不复制记忆正文或截图；token 数为明确标注的字符数粗估。
+- CAE 单测和 Worker 集成测试覆盖各请求目的、来源、版本、裁剪及隐私边界。设备日志展示、长上下文裁剪行为和真实供应商 token 用量关联仍待设备验收。
 
 ## 11. 交付与完成判定
 
