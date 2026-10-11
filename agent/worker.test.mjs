@@ -36,6 +36,14 @@ test("background goal persists progress and completes across screenshot cycles",
     type: "behavior-pattern", state: "active", scope: "global", title: "天气摘要格式",
     condition: "查询天气预报", guidance: "优先给出本地天气", evidence: "用户明确采用过这种格式", createdAt: 50,
   } });
+  records.set("knowledge:tool-candidate:reply-context", { revision: "1", value: {
+    type: "tool-candidate", state: "candidate", name: "微信回复流程参考",
+    description: "先核对微信会话，再查看上下文并确认拟回复内容", toolRefs: ["interaction.capture", "interaction.tap"], createdAt: 60,
+  } });
+  records.set("knowledge:tool-candidate:weather", { revision: "1", value: {
+    type: "tool-candidate", state: "candidate", name: "天气查询候选",
+    description: "打开天气页面并读取天气信息", toolRefs: ["interaction.capture"], createdAt: 70,
+  } });
 
   function tool(method, params) {
     if (method === "data.batch") {
@@ -102,6 +110,8 @@ test("background goal persists progress and completes across screenshot cycles",
   assert.doesNotMatch(modelPrompts.at(-1), /天气预报/);
   assert.match(modelPrompts.at(-1), /简洁友好回复/);
   assert.doesNotMatch(modelPrompts.at(-1), /天气摘要格式/);
+  assert.match(modelPrompts.at(-1), /微信回复流程参考/);
+  assert.doesNotMatch(modelPrompts.at(-1), /天气查询候选/);
   assert.equal(records.get(`agent-runtime:${eventReceiptKey(submission.eventId)}`).value.state, "accepted");
   const duplicateSubmission = deliver(submission);
   assert.equal(duplicateSubmission.duplicate, true);

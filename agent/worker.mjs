@@ -6,6 +6,7 @@ import { SYSTEM_PROMPT } from "./cae/prompts.mjs";
 import { retrieveRelevantExperiences } from "./me/retrieval.mjs";
 import { normalizeBehaviorPattern, retrieveBehaviorPatterns } from "./sm/behavior-patterns.mjs";
 import { isRegisteredTool } from "./te/catalog.mjs";
+import { retrieveRelevantToolCandidates } from "./te/retrieval.mjs";
 import { attachJournalEvents, makeJournalEntry } from "./observability/journal.mjs";
 import { validateScreenAction } from "./ho/decision.mjs";
 import {
@@ -1641,6 +1642,11 @@ function advanceAfterTool(event) {
         const match = state.pendingEventMatch;
         return requestEventMatch(match.event, match.eventTask, { key: match.inboxKey, revision: match.inboxRevision });
       }
+      pending = "tool-candidate-scan";
+      return action("data.scan", { collection: "knowledge", prefix: "tool-candidate:", limit: 100 });
+    }
+    case "tool-candidate-scan": {
+      state.toolCandidates = retrieveRelevantToolCandidates(state.intent, result?.items || [], { limit: 3 });
       const receiptRecovery = recoverPreparedGlobalAction();
       if (receiptRecovery) return receiptRecovery;
       return beginObserve();

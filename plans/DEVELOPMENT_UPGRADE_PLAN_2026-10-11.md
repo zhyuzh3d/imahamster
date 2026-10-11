@@ -501,6 +501,12 @@ JS 测试适合纯状态与组装；QuickJS/Android 仪器测试负责真实模�
 - 并发回归现覆盖“上一条计时 OST 自动等待时又收到下一条 timer”：第二条事件保持在持久 Inbox，未覆盖当前 OST；第一条完成后才创建带新 goalId 的 OST。定向用例与全量 ImHamster Node 76/76 通过，语法与 `git diff --check` 通过。DEV 设备服务仍无前台 Activity，ADB 只见 AVD，真机验收待 USB 调试通道恢复。
 - ImHamster DEV watcher 仍存活并持续同步源码（版本 `0.1.37 / code 38`），runtime 为 `not-visible`。认证服务后执行 `haminn_enter_dev_mode` 仍返回 `not-visible`，随后 `haminn_open_app` 明确失败为“Haminn has no foreground activity”；尝试 `haminn_open_agent_session` 后再次进入 DEV 也没有恢复前台。macOS USB 树识别 CMA-AN00，但 ADB 重启后仍只枚举 AVD，`192.168.124.29:5555` 也拒绝连接，因此无法更新手机 Haminn APK、启动 DEV happ 或做真机 timer/微信验收。已请用户解锁手机、确认 USB 调试和接受本机 RSA 授权；HaminnApp 工作树保留未提交代码，待真机验证后再决定宿主提交与推送。
 
+### 10.23 TE 流程候选检索进入 CAE（2026-10-11）
+
+- 通用缺口：成功后的学习复盘能够保存基于已注册工具的流程候选，但后续任务没有读取这些候选，TE 因而只有“写入”而没有可追查的“检索与供 CAE 使用”闭环。
+- 新增 `agent/te/retrieval.mjs`，从有限的 `tool-candidate:` 知识扫描中验证状态与结构、剔除未注册工具、按任务目标关键词相关度排序并只向 CAE 暴露最多 3 条有限长度候选。候选作为历史参考文本明确标记为非指令、非代码；实际动作仍只能由 LLM 从已注册的屏幕工具中选择。
+- Worker 在普通 OST 的身份/经验加载阶段检索候选；通知事件匹配直接走原匹配流程，不增加无关工具扫描。CAE 只接收清理后的字段，不接收来源目标 ID。新增 TE 排序与白名单单测、CAE 有界上下文测试，以及 Worker 集成测试证明相关候选进入动作提示、无关候选不会进入。全量 `node --test` 78/78 通过，相关模块语法检查与 `git diff --check` 通过；设备运行验证仍待 ADB 恢复，不构成 U3/U5 完成，也不改变未提交的 HaminnApp 工作树。
+
 ## 11. 交付与完成判定
 
 ImHamster 与 Haminn 独立提交、验证和推送；每次提交前核对各自 Git 根与 origin，保留无关工作区改动。宿主新增合同需同步 SDK/能力文档/实际实现，消费者只接入确实支持的能力。

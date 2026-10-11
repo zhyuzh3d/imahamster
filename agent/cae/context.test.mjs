@@ -13,6 +13,7 @@ test("CAE assembles a bounded action context without mutating the OST", () => {
     trace: Array.from({ length: 24 }, (_, index) => ({ step: index, phase: `phase-${index}`, message: "异常".repeat(100) })),
     experiences: Array.from({ length: 7 }, (_, index) => ({ title: `经验 ${index}`, situation: "收消息", approach: "观察", successEvidence: "气泡可见" })),
     behaviorPatterns: Array.from({ length: 7 }, (_, index) => ({ title: `模式 ${index}`, condition: "回复消息", guidance: "简洁", evidence: "用户明确选择" })),
+    toolCandidates: Array.from({ length: 5 }, (_, index) => ({ name: `候选 ${index}`, description: "仅提供参考", toolRefs: ["interaction.tap"] })),
     pendingOperationId: "op-1",
     pendingOperation: { operationId: "op-1", status: "unknown", intendedContent: "你好".repeat(5000) },
     inputRecovery: { stage: "focus-required", code: "E_CONFLICT" },
@@ -29,6 +30,9 @@ test("CAE assembles a bounded action context without mutating the OST", () => {
   assert.doesNotMatch(context, /经验 5/);
   assert.match(context, /模式 0/);
   assert.doesNotMatch(context, /模式 5/);
+  assert.match(context, /候选 0/);
+  assert.doesNotMatch(context, /候选 3/);
+  assert.match(context, /仅是历史参考文本/);
   assert.doesNotMatch(context, /phase-0\"/);
   assert.match(context, /phase-4\"/);
   assert.match(context, /phase-23\"/);
@@ -39,6 +43,7 @@ test("CAE assembles a bounded action context without mutating the OST", () => {
 test("CAE represents missing experience and action history explicitly", () => {
   const context = buildActionContext({ intent: "打开设置", goalDeadlineAt: 60_000 }, { now: 0 });
   assert.match(context, /暂无已验证的相关经验/);
+  assert.match(context, /暂无相关的工具流程候选/);
   assert.match(context, /近期操作记录：\[\]/);
   assert.doesNotMatch(context, /此前 AL 记录：/);
   assert.match(context, /OST 硬时限剩余 1 分钟/);
