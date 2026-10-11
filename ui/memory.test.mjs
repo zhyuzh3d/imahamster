@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { prepareExperienceEdit, prepareMemoryEdit } from "./memory.mjs";
+import { formatMemoryContent, prepareExperienceEdit, prepareMemoryEdit } from "./memory.mjs";
 
 test("memory edits preserve evidence metadata and advance the app revision", () => {
   const current = { id: "memory:contact-a", content: "旧内容", objectRefs: ["contact:A"], revision: 3,
@@ -46,4 +46,11 @@ test("experience Memory edits reject missing fields and unregistered tools", () 
   assert.throws(() => prepareExperienceEdit(null, { ...base,
     toolRefs: Array(9).fill("interaction.tap").map((value, index) => `${value}, interaction.swipe${index}`).join(","),
   }), /已注册工具/);
+});
+
+test("Memory panel content formatter exposes experience method and evidence", () => {
+  assert.equal(formatMemoryContent({ type: "memory", content: "一条事实" }), "一条事实");
+  assert.equal(formatMemoryContent({ type: "experience", situation: "微信新消息", approach: "核对对象后回复",
+    successEvidence: "消息气泡出现", toolRefs: ["interaction.capture", "interaction.tap"] }),
+  "适用情境：微信新消息\n处理做法：核对对象后回复\n结果依据：消息气泡出现\n工具：interaction.capture、interaction.tap");
 });

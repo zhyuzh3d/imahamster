@@ -34,6 +34,12 @@ export function prepareExperienceEdit(current, {
   };
 }
 
+export function formatMemoryContent(value) {
+  if (value?.type !== "experience") return String(value?.content || "");
+  const tools = Array.isArray(value.toolRefs) && value.toolRefs.length ? value.toolRefs.join("、") : "无";
+  return `适用情境：${String(value.situation || "未填写")}\n处理做法：${String(value.approach || "未填写")}\n结果依据：${String(value.successEvidence || "未填写")}\n工具：${tools}`;
+}
+
 export function mountMemoryPanel({ root = globalThis.document, host = () => globalThis.window?.haminn } = {}) {
   const $ = selector => root?.querySelector?.(selector);
   const details = $("#memory-details");
@@ -86,7 +92,9 @@ export function mountMemoryPanel({ root = globalThis.document, host = () => glob
       if (value.type === "experience") {
         const createdAt = Number(value.updatedAt || value.createdAt);
         const date = Number.isFinite(createdAt) && createdAt > 0 ? new Date(createdAt).toLocaleString() : "时间未知";
-        meta.textContent = "可复用经验 · 工具 " + (Array.isArray(value.toolRefs) ? value.toolRefs.length : 0) + " 项 · " + date;
+        const source = typeof value.sourceGoalId === "string" && value.sourceGoalId
+          ? " · 来源任务 " + value.sourceGoalId.slice(0, 48) : "";
+        meta.textContent = "可复用经验 · 工具 " + (Array.isArray(value.toolRefs) ? value.toolRefs.length : 0) + " 项" + source + " · " + date;
       } else {
         const kind = value.kind === "episode" ? "经历" : "事实";
         const inference = value.inference === "inferred" ? "推断" : "观察记录";
@@ -143,7 +151,7 @@ export function mountMemoryPanel({ root = globalThis.document, host = () => glob
       } else {
         const content = root.createElement("p");
         content.className = "memory-entry-content";
-        content.textContent = String(value.content || "");
+        content.textContent = formatMemoryContent(value);
         entry.append(content);
         const actions = root.createElement("div");
         actions.className = "memory-entry-actions";
