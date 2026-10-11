@@ -41,7 +41,11 @@ export function mountWorkerJournal({ root = globalThis.document, host = () => gl
   }
 
   function render() {
-    if (output) output.textContent = formatWorkerJournal(records, { hasMore });
+    if (!output) return;
+    const remaining = Number(output.scrollHeight) - Number(output.scrollTop) - Number(output.clientHeight);
+    const followOutput = !Number.isFinite(remaining) || remaining < 48;
+    output.textContent = formatWorkerJournal(records, { hasMore });
+    if (followOutput) output.scrollTop = output.scrollHeight;
   }
 
   async function loadJournal({ reset = false } = {}) {
@@ -76,7 +80,7 @@ export function mountWorkerJournal({ root = globalThis.document, host = () => gl
         else if (page?.nextAfterKey) afterKey = page.nextAfterKey;
         hasMore = Boolean(page?.nextAfterKey);
         pages += 1;
-        if (!page?.nextAfterKey || currentGoalId !== goalId) break;
+        if (!page?.nextAfterKey || currentGoalId !== goalId || !details?.open) break;
       } while (pages < pageLimit);
       if (records.length > MAX_VISIBLE_EVENTS) records = records.slice(-MAX_VISIBLE_EVENTS);
       if (currentGoalId !== goalId) return;
