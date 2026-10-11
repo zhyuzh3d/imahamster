@@ -1542,7 +1542,7 @@ test("post-completion queue read errors do not reopen or fail the completed OST"
   assert.equal(final.actions, undefined, "a queue bookkeeping fault must not restart the completed task");
 });
 
-test("state persistence failures return once without recursively retrying the same write", () => {
+test("state write failure interrupts delivery without recursively retrying the same write", () => {
   let batchCalls = 0;
 
   function tool(method, params) {
@@ -1559,19 +1559,58 @@ test("state persistence failures return once without recursively retrying the sa
     let output = globalThis.onHaminnEvent(event);
     for (let turn = 0; output?.actions?.length && turn < 8; turn += 1) {
       const call = output.actions[0];
-      try { output = globalThis.onHaminnEvent({ type: "tool.result", callId: call.callId, ok: true, result: tool(call.method, call.params) }); }
-      catch (error) { output = globalThis.onHaminnEvent({ type: "tool.result", callId: call.callId, ok: false,
-        error: { code: error.code, retryable: error.retryable, message: error.message } }); }
+      let result;
+      let bridgeError = null;
+      try { result = tool(call.method, call.params); } catch (error) { bridgeError = error; }
+      output = globalThis.onHaminnEvent({ type: "tool.result", callId: call.callId, ok: !bridgeError,
+        ...(bridgeError ? { error: { code: bridgeError.code, retryable: bridgeError.retryable, message: bridgeError.message } } : { result }) });
     }
     return output;
   }
 
   assert.equal(deliver({ type: "start" }).state, "idle");
-  const result = deliver({ type: "goal.submit", intent: "完成合成任务" });
+  assert.throws(() => deliver({ type: "goal.submit", eventId: "synthetic-submit", intent: "完成合成任务" }), error => {
+    assert.equal(error.category, "worker-state-persistence");
+    assert.match(error.message, /持久化失败/);
+    return true;
+  });
   assert.equal(batchCalls, 1, "a failed checkpoint is not recursively written again");
-  assert.equal(result.state, "retryable-error");
-  assert.equal(result.userRequired, true);
-  assert.equal(result.category, "worker-state-persistence");
+});
+
+test("failure to read a durable goal receipt interrupts delivery before acknowledging it", () => {
+  let failReceiptRead = false;
+
+  function tool(method, params) {
+    if (method === "data.get") {
+      if (failReceiptRead && params.key.startsWith("event:")) {
+        throw Object.assign(new Error("synthetic receipt-store outage"), { code: "E_STORAGE", retryable: true });
+      }
+      return null;
+    }
+    if (method === "data.batch") return { results: [] };
+    throw new Error(`Unexpected tool: ${method}`);
+  }
+
+  function deliver(event) {
+    let output = globalThis.onHaminnEvent(event);
+    for (let turn = 0; output?.actions?.length && turn < 8; turn += 1) {
+      const call = output.actions[0];
+      let result;
+      let bridgeError = null;
+      try { result = tool(call.method, call.params); } catch (error) { bridgeError = error; }
+      output = globalThis.onHaminnEvent({ type: "tool.result", callId: call.callId, ok: !bridgeError,
+        ...(bridgeError ? { error: { code: bridgeError.code, retryable: bridgeError.retryable, message: bridgeError.message } } : { result }) });
+    }
+    return output;
+  }
+
+  assert.equal(deliver({ type: "start" }).state, "idle");
+  failReceiptRead = true;
+  assert.throws(() => deliver({ type: "goal.submit", eventId: "synthetic-submit-read", intent: "完成合成任务" }), error => {
+    assert.equal(error.category, "worker-state-persistence");
+    assert.equal(error.code, "E_STORAGE");
+    return true;
+  });
 });
 
 test("recovery gives the model pending operation details and does not replay an unknown effect", () => {

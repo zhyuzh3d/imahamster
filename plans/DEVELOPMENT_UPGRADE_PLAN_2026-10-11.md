@@ -559,6 +559,12 @@ JS 测试适合纯状态与组装；QuickJS/Android 仪器测试负责真实模�
 - 这些字段只供 LLM 反思、重新规划或续行；HO 不据此判断业务失败或任务成功。LLM 选择 restart 时，Worker 在重置连续信号前把被清零的计数写入完整轨迹，累计故障分类跨 AL 和 restart 保留。无法归入模型/屏幕阶段的可重试 Bridge/Worker 故障会有界退避后重新观察，再把现场交回 LLM；不可重试或耗尽连续恢复次数时转为需用户处理的 waiting，不伪造 LLM stop。任务终态后的队列读取故障不会把已完成 OST 改回 waiting。`data.put/data.batch` 状态写入失败会返回可重试的持久化错误，避免重试器因无法保存自身状态而递归写入。日志可由 Worker Journal 增量查看。
 - 新增分类累积/上限/去敏测试、CAE 信号组装测试，并扩展 Worker 集成用例验证合法模型决策后累计错误仍进入后续动作上下文、故障检查点经 Worker 重启后继续由 LLM 完成 OST、完成态保持不变，以及持久化故障停止递归写入。最终全量 `node --test` 105/105 通过，app/Worker/CAE/HO 语法检查及 `git diff --check` 通过；DEV happ 版本为 `0.1.40 / code 41`。活动 watcher 持续发布新修订，但运行态仍为 `not-visible`、刷新失败；ADB 重启和 USB 查询仍只看到 emulator，因此本条仅是代码与开发树验证，真机/微信行为尚未验收。
 
+### 10.32 状态持久化故障保留 Host 事件并提供可见重试（2026-10-11）
+
+- 过程检查发现：关键 `data.put/data.batch` 失败以及 OST/EDT 幂等回执读取失败时，Worker 以前会把基础设施故障作为普通 JSON 返回。Haminn `WorkerHostService` 因此认为事件已正常处理并确认，可能丢失用户提交或未完成的通知/计时触发；如果尚未创建 `active-goal`，面板也因只看持久状态而隐藏失败。
+- Worker 现在将活动状态与关键事件回执的存储失败作为带阶段、错误码和可重试类别的运行异常抛出。Haminn `WorkerRuntime` 对可重试的 `data.get/put/batch` 存储错误、SQLite 锁冲突做最多两次短退避重试；耗尽后异常退出。Host 仅在 `deliver` 正常返回后确认持久事件，因此异常后原事件保留。Host 仪器测试覆盖异常不确认，Worker Runtime 仪器测试覆盖有限重试和耗尽后异常；既有动作回执和业务成功判定机制不变。
+- 新增独立 `ui/worker-panel-state.mjs`，统一判断中断面板可见性和当前 OST 未持久化时的重试资格，包括数据中仍有上一个终态 OST 的情况。用户重试会启动 Worker 处理仍在 Host 持久队列中的原事件，不重新提交相同 OST；确认对应活动记录或排队记录重新出现后才报告恢复。全量 `node --test` 110/110 通过；Haminn API 37 AVD 上 WorkerRuntime 与 Host 定向仪器用例合计 7/7 通过。DEV 版本提升为 `0.1.41 / code 42`，watcher 已发布到 revision 1128，但 target 未前台可见、刷新失败；ADB 仍只枚举模拟器，因此真机/微信行为尚未验收。
+
 ## 11. 交付与完成判定
 
 ImHamster 与 Haminn 独立提交、验证和推送；每次提交前核对各自 Git 根与 origin，保留无关工作区改动。宿主新增合同需同步 SDK/能力文档/实际实现，消费者只接入确实支持的能力。

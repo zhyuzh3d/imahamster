@@ -56,6 +56,10 @@ const GLOBAL_ACTION_RECEIPT_STAGES = new Set([
   "global-action-scheduled-saved", "global-action-initial-wait", "global-action-poll-saved",
   "global-action-poll-wait", "global-action-status",
 ]);
+const CRITICAL_STATE_READ_STAGES = new Set([
+  "load-active", "goal-submit-receipt-read", "notification-receipt-read", "timer-receipt-read",
+  "event-task-control-receipt-read", "event-task-control-task-read",
+]);
 
 
 let state = null;
@@ -200,6 +204,16 @@ function resultOf(event) {
     throw error;
   }
   return event.result;
+}
+
+function workerPersistenceFailure(error, stage) {
+  const code = String(error?.code || "E_STORAGE").slice(0, 48);
+  const reason = String(error?.message || error).slice(0, 240);
+  const failure = new Error(`Worker 状态持久化失败（${stage || "未知阶段"} / ${code}）：${reason}`);
+  failure.code = code;
+  failure.category = "worker-state-persistence";
+  failure.retryable = true;
+  return failure;
 }
 
 function record(collection, key, value) {
@@ -2082,6 +2096,13 @@ globalThis.onHaminnEvent = event => {
         return action("data.put", { collection: COLLECTION, key: ACTIVE_KEY, value: state });
       }
       failedBridgeMethod = activeCallMethod;
+      const failedCriticalRead = failedBridgeMethod === "data.get" && CRITICAL_STATE_READ_STAGES.has(pending);
+      if (!event.ok && (failedBridgeMethod === "data.put" || failedBridgeMethod === "data.batch" || failedCriticalRead)) {
+        const bridgeError = Object.assign(new Error(event.error?.message || "Haminn 数据存储调用失败"), {
+          code: event.error?.code, retryable: event.error?.retryable,
+        });
+        throw workerPersistenceFailure(bridgeError, pending);
+      }
       settleJournalWrite(event);
       activeCallId = null;
       activeCallMethod = null;
@@ -2089,29 +2110,7 @@ globalThis.onHaminnEvent = event => {
     }
     return { state: "ignored" };
   } catch (error) {
-    if (["user-wait-saved", "runtime-error-saved", "goal-time-limit-saved"].includes(pending)) {
-      return { state: "retryable-error", taskId: state?.taskId || null, userRequired: true,
-        category: "worker-state-persistence", error: String(error?.message || error).slice(0, 240) };
-    }
-    if (pending === "event-task-control-failure-saved") {
-      const control = pendingEventTaskControl;
-      pendingEventTaskControl = null;
-      return { state: "retryable-error", eventTaskId: control?.eventTaskId,
-        error: String(error?.message || error).slice(0, 240) };
-    }
-    if (event?.type === "tool.result" && !event.ok && ["data.put", "data.batch"].includes(failedBridgeMethod)) {
-      const reason = String(error?.message || error).slice(0, 240);
-      const errorCode = String(error?.code || "").slice(0, 48);
-      const signal = recordRecoveryFailure(state, {
-        stage: pending,
-        category: "worker-state-persistence",
-        code: errorCode || undefined,
-      });
-      appendTrace("recovery.failure-recorded", signal);
-      appendTrace("worker.persistence-failed", { stage: pending, code: errorCode || null });
-      return { state: "retryable-error", taskId: state?.taskId || null, userRequired: true,
-        category: "worker-state-persistence", stage: pending, error: reason };
-    }
+    if (error?.category === "worker-state-persistence") throw error;
     if (pending.startsWith("event-task-control-") && pending !== "event-task-control-failure-saved" && pendingEventTaskControl) {
       return saveEventTaskControlFailure(error);
     }
