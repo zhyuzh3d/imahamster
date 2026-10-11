@@ -472,6 +472,13 @@ JS 测试适合纯状态与组装；QuickJS/Android 仪器测试负责真实模�
 - 新增时间助手单测和 Worker 生产路径集成测试：模型请求期间推进虚拟时钟跨越 AL 预算，验证发生复盘、无屏幕动作派发，并由模型选择续时后继续；OST timeout 计算覆盖正常、已到期和无 deadline 情况。全量 Node 测试 70/70 通过，相关模块语法检查与 `git diff --check` 通过。
 - Haminn `NativeHttpClient` 把 HTTP timeout 最小限制在 5 秒，因此剩余不足 5 秒时，本地 `timeoutMs` 不能单独证明原生请求会在 OST 截止的精确瞬间取消。当前仍缺原生 deadline watchdog/可取消 job，未声明 OST 硬时限已完全实现；该项仍属于 U1。此修复只有本地/合成证据，未部署到设备。
 
+### 10.19 OST 截止时间传递到宿主外部效果（2026-10-11）
+
+- 通用缺陷：HO 原先只在下一次 Worker 状态推进时检查 30 分钟 OST 截止点；如果 Bridge 正在执行模型 HTTP 或屏幕效果，宿主不知道这个绝对期限。ImHamster 请求 timeout 也不能覆盖 Haminn 的 HTTP 5 秒最小超时。
+- ImHamster 现在为活动 OST 的 Worker effect 附带内部绝对截止时间元数据。Haminn WorkerHost 在送入 capability 前剥除该字段，只对网络/屏幕外部效果建立单调时钟超时和独立 watchdog；网络 watchdog 会取消该 Worker session 的 OkHttp owner。到期以 `E_TIMEOUT` 返回原 Worker，HO 走既有 30 分钟失败保存路径；`data.*` 持久化不受截止门阻断，以便如实记录失败和未决操作。
+- ImHamster 新增宿主超时返回后的 HO 集成用例，并验证 EDT 分类/匹配没有单次期限，而触发出的 OST 会单独携带期限；全量 Node 测试为 71/71 通过。Haminn watchdog 取消网络 owner 后会保留 tombstone 到当前请求注销，再清除取消标记，避免用户新建重试时同一 Worker session 的网络永久锁死。Haminn 新增剩余时间纯函数单测，但本机当前没有可用 Java Runtime，Gradle 测试、Kotlin 编译和 instrumentation 编译均未运行；ADB 也未枚举设备，因此该宿主改动尚未部署/真机验证。Haminn 工作树中的源文件保持未提交。
+- 这是 U1 的 effect deadline 子项，不等同于非阻塞 job、优先控制抢占、跨进程 OST watchdog 或宿主事件循环解耦完成。`closeAll` 可取消网络 owner；Android 已经开始执行的系统输入动作不能撤回，仍须把回执视为可能未知并由 HO/LLM 复盘。
+
 ## 11. 交付与完成判定
 
 ImHamster 与 Haminn 独立提交、验证和推送；每次提交前核对各自 Git 根与 origin，保留无关工作区改动。宿主新增合同需同步 SDK/能力文档/实际实现，消费者只接入确实支持的能力。

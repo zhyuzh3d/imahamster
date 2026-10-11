@@ -44,6 +44,7 @@ const MAX_RECOVERY_ATTEMPTS = 12;
 const DEFAULT_ACTION_LOOP_BUDGET_MINUTES = 15;
 const MAX_ACTION_LOOP_BUDGET_MINUTES = 30;
 const MAX_GOAL_DURATION_MS = 30 * 60_000;
+const HOST_DEADLINE_PARAMETER = "__haminnWorkerDeadlineAt";
 const GLOBAL_ACTION_RECEIPT_STAGES = new Set([
   "global-action-scheduled-saved", "global-action-initial-wait", "global-action-poll-saved",
   "global-action-poll-wait", "global-action-status",
@@ -155,8 +156,13 @@ function action(method, params = {}) {
     method = "data.batch";
     params = { operations: checkpointed };
   }
+  const actionParams = { ...params };
+  delete actionParams[HOST_DEADLINE_PARAMETER];
+  if (state && !terminal(state.state) && !["unclassified", "event-match", "event-driven"].includes(state.taskType)) {
+    actionParams[HOST_DEADLINE_PARAMETER] = ensureGoalDeadline();
+  }
   activeCallId = callId;
-  return { actions: [{ callId, method, params }] };
+  return { actions: [{ callId, method, params: actionParams }] };
 }
 
 function settleJournalWrite(event) {

@@ -138,6 +138,7 @@ test("an EDT notification is deduplicated, matched by the LLM, and creates one s
   const eventId = "notification:synthetic-001";
   let matchCalls = 0;
   let captures = 0;
+  const hostDeadlines = [];
 
   function tool(method, params) {
     if (method === "data.batch") {
@@ -169,6 +170,7 @@ test("an EDT notification is deduplicated, matched by the LLM, and creates one s
       return { mime: "image/jpeg", width: 1, height: 1, dataBase64: "c3ludGhldGljLWZyYW1l" };
     }
     if (method === "network.request") {
+      hostDeadlines.push(params.__haminnWorkerDeadlineAt);
       const body = JSON.parse(params.bodyText);
       const prompt = body.messages?.map(message => typeof message.content === "string" ? message.content
         : message.content?.map?.(part => part.text || "").join(" ")).join("\n") || "";
@@ -224,6 +226,9 @@ test("an EDT notification is deduplicated, matched by the LLM, and creates one s
   const completed = deliver({ type: "event.acknowledged", eventId });
   assert.equal(completed.state, "done");
   assert.ok(captures >= 1);
+  assert.equal(hostDeadlines[0], undefined, "EDT classification is not bounded as a one-shot task");
+  assert.equal(hostDeadlines[1], undefined, "matching an event does not start the OST clock");
+  assert.ok(Number.isFinite(hostDeadlines[2]), "the triggered OST carries its own host deadline");
   assert.equal(records.get("agent-runtime:active-goal").value.sourceEventId, eventId);
   assert.equal(records.get(`event-tasks:ed:${eventTask.eventTaskId}`).value.state, "active");
 });
@@ -449,6 +454,69 @@ test("automatic waits are clamped to the OST deadline and expiry is saved before
     assert.equal(captures, 1, "deadline expiry must stop before another screenshot or model action");
     assert.ok(saved.trace.some((event) => event.phase === "task.wait-scheduled" && event.scheduledMs === 60_000));
     assert.ok(saved.trace.some((event) => event.phase === "goal.time-limit-exceeded"));
+  } finally {
+    Date.now = originalNow;
+  }
+});
+
+test("host OST timeout returns to HO, which persists failure without another screen effect", () => {
+  const originalNow = Date.now;
+  let now = 5_000_000;
+  Date.now = () => now;
+  const deadlineAt = now + 12 * 60_000;
+  const records = new Map();
+  records.set("agent-runtime:active-goal", { revision: "1", value: {
+    goalId: "ost-host-deadline", taskId: "task-host-deadline", runId: "run-host-deadline",
+    intent: "完成合成页面任务", state: "active", taskType: "one-shot", taskKind: "OST",
+    createdAt: now, goalAttemptStartedAt: now, goalDeadlineAt: deadlineAt, step: 2, journalSequence: 0,
+    actionLoop: { index: 1, status: "running", budgetMinutes: 15, elapsedMs: 0 }, trace: [],
+  } });
+  const provider = { baseUrl: "https://model.example", apiKey: "x".repeat(24), model: "vision-model" };
+
+  function tool(method, params) {
+    if (method === "data.get") return params.key === "provider" ? { value: provider } : records.get(`${params.collection}:${params.key}`) || null;
+    if (method === "data.scan") return { items: [] };
+    if (method === "data.put") return { revision: "2" };
+    if (method === "data.batch") {
+      for (const item of params.operations) {
+        const key = `${item.collection}:${item.key}`;
+        if (item.op === "delete") records.delete(key);
+        else records.set(key, { value: item.value, revision: "2" });
+      }
+      return { results: [] };
+    }
+    if (method === "interaction.capture") return { mime: "image/jpeg", dataBase64: "synthetic-frame" };
+    throw new Error(`Unexpected tool before deadline-bearing effect: ${method}`);
+  }
+
+  try {
+    let output = globalThis.onHaminnEvent({ type: "start" });
+    let deadlineCall = null;
+    for (let turn = 0; output?.actions?.length && turn < 20; turn += 1) {
+      const call = output.actions[0];
+      if (call.method.startsWith("interaction.") || call.method === "network.request" || call.method === "files.readText") {
+        deadlineCall = call;
+        break;
+      }
+      output = globalThis.onHaminnEvent({ type: "tool.result", callId: call.callId, ok: true, result: tool(call.method, call.params) });
+    }
+
+    assert.ok(deadlineCall, "startup should reach the first external observation");
+    assert.equal(deadlineCall.params.__haminnWorkerDeadlineAt, deadlineAt);
+
+    now = deadlineAt;
+    output = globalThis.onHaminnEvent({ type: "tool.result", callId: deadlineCall.callId, ok: false,
+      error: { code: "E_TIMEOUT", message: "OST 软件时限已到，宿主已取消当前外部操作", retryable: false } });
+    for (let turn = 0; output?.actions?.length && turn < 8; turn += 1) {
+      const call = output.actions[0];
+      assert.equal(call.method, "data.batch", "HO may save its hard-time-limit result after expiry");
+      output = globalThis.onHaminnEvent({ type: "tool.result", callId: call.callId, ok: true, result: tool(call.method, call.params) });
+    }
+    const saved = records.get("agent-runtime:active-goal")?.value;
+    assert.equal(output.state, "failed");
+    assert.equal(saved.state, "failed");
+    assert.equal(saved.waiting.category, "goal-time-limit");
+    assert.ok(saved.trace.some(event => event.phase === "goal.time-limit-exceeded"));
   } finally {
     Date.now = originalNow;
   }
@@ -707,7 +775,9 @@ test("input actions forward screenshot-normalized editor coordinates to the nati
 
   const result = deliver({ type: "goal.submit", intent: "在指定会话输入合成测试正文" });
   assert.equal(result.state, "done", JSON.stringify(result));
-  assert.deepEqual(inputCalls, [{ text: "synthetic test", mode: "replace", x: 0.42, y: 0.61 }]);
+  assert.deepEqual(inputCalls.map(({ __haminnWorkerDeadlineAt, ...params }) => params),
+    [{ text: "synthetic test", mode: "replace", x: 0.42, y: 0.61 }]);
+  assert.ok(inputCalls[0].__haminnWorkerDeadlineAt > Date.now(), "the host receives an active OST deadline");
 });
 
 test("input conflict codes reach CAE recovery context and guide a fresh observation after refocus", () => {
