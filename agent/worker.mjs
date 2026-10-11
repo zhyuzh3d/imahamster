@@ -14,6 +14,14 @@ import { retrieveRelevantToolRecipes } from "./te/recipe-retrieval.mjs";
 import { prepareLearningRecords } from "./learning/records.mjs";
 import { makeJournalEntry } from "./observability/journal.mjs";
 import { prepareJournaledStoreWrite } from "./storage/journaled-write.mjs";
+import {
+  clearLifecycleRevisions,
+  hasLifecycleWrite,
+  knowsLifecycleRevision,
+  lifecycleStoreContractError,
+  observeStoreEffectResult,
+  prepareRevisionCheckedWrite,
+} from "./storage/revisions.mjs";
 import { validateScreenAction } from "./ho/decision.mjs";
 import { goalPlanFromRecord, goalProgressRecord, taskPlanFromRecord, taskProgressRecord } from "./ho/records.mjs";
 import {
@@ -55,6 +63,7 @@ const EVENT_TASKS_COLLECTION = "event-tasks";
 const NOTIFICATION_INBOX_PREFIX = "n:";
 const MAX_RECOVERY_ATTEMPTS = 12;
 const MAX_POST_TASK_QUEUE_RECOVERY_ATTEMPTS = 8;
+const MAX_STORAGE_CONFLICT_RECOVERIES = 3;
 const DEFAULT_ACTION_LOOP_BUDGET_MINUTES = 15;
 const MAX_ACTION_LOOP_BUDGET_MINUTES = 30;
 const MAX_GOAL_DURATION_MS = 30 * 60_000;
@@ -65,6 +74,8 @@ const GLOBAL_ACTION_RECEIPT_STAGES = new Set([
 ]);
 const CRITICAL_STATE_READ_STAGES = new Set([
   "load-active", "load-active-goal-plan", "load-active-task-plan",
+  "storage-conflict-active-read", "storage-conflict-goal-read", "storage-conflict-task-read",
+  "task-handoff-target-read",
   "goal-submit-receipt-read", "notification-receipt-read", "timer-receipt-read",
   "event-task-control-receipt-read", "event-task-control-task-read",
   "goal-control-receipt-read", "goal-control-active-read", "goal-control-goal-read", "goal-control-task-read",
@@ -88,11 +99,16 @@ let callSequence = 0;
 const workerEpoch = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 let activeCallId = null;
 let activeCallMethod = null;
+let activeCallParams = null;
+let suspendedActiveCall = null;
 let deferredCall = null;
 let temporaryProviderText = null;
 let journalPending = [];
 let journalInFlight = [];
 let journalCommitCallId = null;
+const lifecycleRevisions = new Map();
+let storageConflictAttempts = 0;
+let storageConflictContext = null;
 let pendingGoalSubmit = null;
 let pendingNotificationEvent = null;
 let pendingNotificationRecord = null;
@@ -196,6 +212,7 @@ function action(method, params = {}) {
     method = journaledWrite.method;
     params = journaledWrite.params;
   }
+  params = prepareRevisionCheckedWrite(method, params, lifecycleRevisions);
   const actionParams = { ...params };
   delete actionParams[HOST_DEADLINE_PARAMETER];
   if (state && !terminal(state.state) && !["unclassified", "event-match", "event-driven"].includes(state.taskType)) {
@@ -203,6 +220,7 @@ function action(method, params = {}) {
   }
   activeCallId = callId;
   activeCallMethod = method;
+  activeCallParams = actionParams;
   return { actions: [{ callId, method, params: actionParams }] };
 }
 
@@ -231,6 +249,49 @@ function workerPersistenceFailure(error, stage) {
   failure.category = "worker-state-persistence";
   failure.retryable = true;
   return failure;
+}
+
+function beginStorageConflictRecovery(error, method, failedStage) {
+  storageConflictAttempts += 1;
+  if (storageConflictAttempts > MAX_STORAGE_CONFLICT_RECOVERIES) {
+    throw workerPersistenceFailure(error, `${failedStage}（CAS 冲突恢复 ${storageConflictAttempts - 1} 次后仍失败）`);
+  }
+
+  storageConflictContext = {
+    stage: String(failedStage || "unknown").slice(0, 80),
+    method,
+    attempts: storageConflictAttempts,
+    code: String(error?.code || "E_CONFLICT").slice(0, 48),
+  };
+  // The batch was rejected atomically. Its uncommitted trace entries belong to
+  // the stale snapshot, so replace them with one conflict record after reload.
+  journalPending = [];
+  journalInFlight = [];
+  journalCommitCallId = null;
+  state = null;
+  pending = "storage-conflict-active-read";
+  return action("data.get", { collection: COLLECTION, key: ACTIVE_KEY });
+}
+
+function continueAfterStorageConflict() {
+  const context = storageConflictContext;
+  storageConflictContext = null;
+  if (!state) {
+    return { state: "conflict", retryable: true, storageConflict: context,
+      error: "CAS 冲突后未找到活动 OST；可重新投递原任务。" };
+  }
+
+  appendTrace("storage.conflict-reloaded", context || {});
+  if (terminal(state.state) || state.state === "paused" || state.state === "waiting") {
+    pending = "storage-conflict-state-saved";
+    return action("data.put", { collection: COLLECTION, key: ACTIVE_KEY, value: state });
+  }
+  if (["event-match", "unclassified"].includes(state.taskType) || !state.goalId || !state.taskId) {
+    return beginObserve();
+  }
+  if (state.taskGraph && state.lastDecision?.state === "task-done") return advanceTaskGraph();
+  pending = "storage-conflict-goal-read";
+  return action("data.get", { collection: "goals", key: `g:${state.goalId}` });
 }
 
 function record(collection, key, value) {
@@ -1640,6 +1701,15 @@ function advanceTaskGraph() {
   const graph = state.taskGraph;
   if (!graph?.tasks?.length) throw new Error("Task-done 回执缺少持久 Task graph");
   const next = nextReadySubtask(graph);
+  if (!next && !graph.tasks.every(task => task.state === "done")) {
+    throw new Error("Task graph 没有可调度的 ready Task，且仍存在未完成项");
+  }
+  const targetTaskId = next?.taskId || graph.coordinatorTaskId;
+  const targetKey = `t:${targetTaskId}`;
+  if (!knowsLifecycleRevision(lifecycleRevisions, "tasks", targetKey)) {
+    pending = "task-handoff-target-read";
+    return action("data.get", { collection: "tasks", key: targetKey });
+  }
   if (next) {
     state.taskGraph = setSubtaskState(graph, next.taskId, "running", { at: Date.now() });
     state.taskId = next.taskId;
@@ -1913,6 +1983,36 @@ function advanceAfterTool(event) {
     return action("data.put", { collection: COLLECTION, key: ACTIVE_KEY, value: state });
   }
   switch (pending) {
+    case "storage-conflict-active-read": {
+      state = result?.value || null;
+      if (!state) {
+        const conflict = storageConflictContext;
+        storageConflictContext = null;
+        return { state: "conflict", retryable: true, storageConflict: conflict,
+          error: "CAS 冲突后未找到活动 OST；可重新投递原任务。" };
+      }
+      if (terminal(state.state) || state.state === "paused" || state.state === "waiting" ||
+          ["event-match", "unclassified"].includes(state.taskType) || !state.goalId || !state.taskId) {
+        return continueAfterStorageConflict();
+      }
+      pending = "storage-conflict-goal-read";
+      return action("data.get", { collection: "goals", key: `g:${state.goalId}` });
+    }
+    case "storage-conflict-goal-read": {
+      state.goalPlan = goalPlanFromRecord(result?.value);
+      pending = "storage-conflict-task-read";
+      return action("data.get", { collection: "tasks", key: `t:${state.taskId}` });
+    }
+    case "storage-conflict-task-read": {
+      state.taskPlan = taskPlanFromRecord(result?.value);
+      state.taskRecordKind = typeof result?.value?.kind === "string" ? result.value.kind : "screen-work";
+      return continueAfterStorageConflict();
+    }
+    case "storage-conflict-state-saved": {
+      if (terminal(state?.state)) return readNextQueuedGoal();
+      return { state: state?.state || "idle", progress: state?.progress || "",
+        storageConflictRecovered: true };
+    }
     case "goal-control-receipt-read": {
       const control = pendingGoalControl;
       const receiptRecord = result;
@@ -2126,6 +2226,7 @@ function advanceAfterTool(event) {
       return applyActionLoopPlan(plan);
     }
     case "task-handoff-saved": return beginActionLoopPlanning(state.taskReviewMode ? "goal-review" : "next-subtask");
+    case "task-handoff-target-read": return advanceTaskGraph();
     case "get-provider": {
       const config = result?.value;
       if (!providerValid(config)) throw new Error("模型配置无效或尚未设置");
@@ -2315,7 +2416,11 @@ function advanceAfterTool(event) {
       const resume = state.staleToolResultResume;
       delete state.staleToolResultResume;
       if (resume) {
+        const suspended = suspendedActiveCall?.callId === resume.callId ? suspendedActiveCall : null;
         activeCallId = resume.callId;
+        activeCallMethod = suspended?.method || null;
+        activeCallParams = suspended?.params || null;
+        suspendedActiveCall = null;
         pending = resume.pending;
       }
       return { state: state?.state || "idle", ignored: true };
@@ -2476,6 +2581,10 @@ globalThis.onHaminnEvent = event => {
       activeIdentityCore = { content: DEFAULT_IDENTITY_CORE, version: 0 };
       identityCoreLoaded = false;
       pendingContextManifest = null;
+      clearLifecycleRevisions(lifecycleRevisions);
+      storageConflictAttempts = 0;
+      storageConflictContext = null;
+      suspendedActiveCall = null;
       pending = "load-active";
       return action("data.get", { collection: COLLECTION, key: ACTIVE_KEY });
     }
@@ -2485,11 +2594,24 @@ globalThis.onHaminnEvent = event => {
         const receivedCallId = String(event.callId || "").slice(0, 120);
         appendTrace("worker.stale-tool-result", { receivedCallId, expectedCallId: activeCallId, stage: pending });
         if (!state) return { state: "ignored", reason: "stale-tool-result" };
+        suspendedActiveCall = activeCallId ? {
+          callId: activeCallId, method: activeCallMethod, params: activeCallParams,
+        } : null;
         state.staleToolResultResume = { callId: activeCallId, pending };
         pending = "stale-tool-result-saved";
         return action("data.put", { collection: COLLECTION, key: ACTIVE_KEY, value: state });
       }
       failedBridgeMethod = activeCallMethod;
+      settleJournalWrite(event);
+      if (!event.ok && event.error?.code === "E_CONFLICT" &&
+          hasLifecycleWrite(activeCallMethod, activeCallParams)) {
+        const failedMethod = activeCallMethod;
+        const failedStage = pending;
+        activeCallId = null;
+        activeCallMethod = null;
+        activeCallParams = null;
+        return beginStorageConflictRecovery(event.error, failedMethod, failedStage);
+      }
       const failedCriticalRead = (failedBridgeMethod === "data.get" || failedBridgeMethod === "data.scan") &&
         CRITICAL_STATE_READ_STAGES.has(pending);
       if (!event.ok && (failedBridgeMethod === "data.put" || failedBridgeMethod === "data.batch" || failedCriticalRead)) {
@@ -2498,9 +2620,18 @@ globalThis.onHaminnEvent = event => {
         });
         throw workerPersistenceFailure(bridgeError, pending);
       }
-      settleJournalWrite(event);
+      if (event.ok) {
+        const contractError = lifecycleStoreContractError(activeCallMethod, activeCallParams, event.result);
+        if (contractError) {
+          throw workerPersistenceFailure(Object.assign(new Error(contractError), { code: "E_STORAGE" }), pending);
+        }
+        observeStoreEffectResult(lifecycleRevisions, activeCallMethod, activeCallParams, event.result);
+        if (["data.put", "data.batch"].includes(activeCallMethod) &&
+            hasLifecycleWrite(activeCallMethod, activeCallParams)) storageConflictAttempts = 0;
+      }
       activeCallId = null;
       activeCallMethod = null;
+      activeCallParams = null;
       return advanceAfterTool(event);
     }
     return { state: "ignored" };

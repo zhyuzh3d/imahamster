@@ -5,6 +5,171 @@ import { notificationInboxKey, timerInboxKey } from "./ho/edts.mjs";
 import { memorySourceRef } from "./me/memory.mjs";
 import "./worker.mjs";
 
+let mockStoreRevision = 0;
+function mockBatchResult(params) {
+  return { results: (params?.operations || []).map(operation => operation.op === "delete"
+    ? { op: "delete", key: operation.key, deleted: false }
+    : { op: "put", key: operation.key, revision: `mock-r${++mockStoreRevision}` }) };
+}
+
+function persistMockBatch(records, params) {
+  const result = mockBatchResult(params);
+  params.operations.forEach((operation, index) => {
+    const key = `${operation.collection}:${operation.key}`;
+    if (operation.op === "delete") records.delete(key);
+    else records.set(key, { value: operation.value, revision: result.results[index].revision });
+  });
+  return result;
+}
+
+test("a lifecycle CAS conflict reloads durable state before Worker progress continues", () => {
+  const started = globalThis.onHaminnEvent({ type: "start" });
+  assert.equal(started.actions[0].method, "data.get");
+  const idle = globalThis.onHaminnEvent({ type: "tool.result", callId: started.actions[0].callId,
+    ok: true, result: null });
+  assert.equal(idle.state, "idle");
+
+  const submitted = globalThis.onHaminnEvent({ type: "goal.submit", intent: "合成 CAS 冲突恢复测试" });
+  const initialActiveWrite = submitted.actions[0].params.operations.find(operation =>
+    operation.collection === "agent-runtime" && operation.key === "active-goal");
+  assert.equal(initialActiveWrite.expectedRevision, "absent");
+
+  const reload = globalThis.onHaminnEvent({ type: "tool.result", callId: submitted.actions[0].callId,
+    ok: false, error: { code: "E_CONFLICT", message: "revision changed" } });
+  assert.equal(reload.actions[0].method, "data.get");
+  assert.deepEqual(reload.actions[0].params, { collection: "agent-runtime", key: "active-goal" });
+
+  const latest = {
+    schemaVersion: 1, goalId: "goal-latest", taskId: "task-latest", runId: "run-latest",
+    intent: "持久化中的较新目标", taskType: "one-shot", taskKind: "OST", state: "paused",
+    revision: 7, progress: "用户已暂停", waiting: null, trace: [], journalSequence: 0,
+    createdAt: 100, goalAttemptStartedAt: 100, goalDeadlineAt: 1_800_100,
+  };
+  const saved = globalThis.onHaminnEvent({ type: "tool.result", callId: reload.actions[0].callId,
+    ok: true, result: { collection: "agent-runtime", key: "active-goal", value: latest, revision: "host-r9" } });
+  assert.equal(saved.actions[0].method, "data.batch");
+  const activeWrite = saved.actions[0].params.operations.find(operation =>
+    operation.collection === "agent-runtime" && operation.key === "active-goal");
+  assert.equal(activeWrite.expectedRevision, "host-r9");
+  assert.equal(activeWrite.value.goalId, "goal-latest");
+  assert.equal(activeWrite.value.state, "paused");
+
+  const reset = globalThis.onHaminnEvent({ type: "start" });
+  globalThis.onHaminnEvent({ type: "tool.result", callId: reset.actions[0].callId, ok: true, result: null });
+});
+
+test("a CAS recovery at the task-done boundary resumes HO handoff and loads the next Task revision", () => {
+  const start = globalThis.onHaminnEvent({ type: "start" });
+  const idle = globalThis.onHaminnEvent({ type: "tool.result", callId: start.actions[0].callId, ok: true, result: null });
+  assert.equal(idle.state, "idle");
+  const submitted = globalThis.onHaminnEvent({ type: "goal.submit", intent: "合成 task-done 冲突恢复" });
+  const reloading = globalThis.onHaminnEvent({ type: "tool.result", callId: submitted.actions[0].callId,
+    ok: false, error: { code: "E_CONFLICT", message: "revision changed" } });
+
+  const now = Date.now();
+  const first = { taskId: "task-cas-first", runId: "run-first", objective: "读取最新消息", kind: "screen-work",
+    state: "done", dependencies: [], objectKey: null, revision: 2, createdAt: now, planIndex: 0, progress: "已读取" };
+  const second = { taskId: "task-cas-second", runId: "run-second", objective: "核对回复结果", kind: "screen-work",
+    state: "ready", dependencies: [first.taskId], objectKey: null, revision: 1, createdAt: now, planIndex: 1, progress: "" };
+  const active = {
+    goalId: "goal-cas-recovery", taskId: first.taskId, runId: first.runId, intent: "读取新消息并核对回复",
+    state: "active", taskType: "one-shot", taskKind: "OST", step: 2, revision: 5, createdAt: now,
+    goalAttemptStartedAt: now, goalDeadlineAt: now + 1_000_000, progress: "已读取",
+    taskGraph: { coordinatorTaskId: "task-cas-coordinator", coordinatorRunId: "run-coordinator",
+      coordinatorRevision: 2, currentTaskId: first.taskId, createdAt: now, tasks: [first, second] },
+    lastDecision: { state: "task-done", evidence: "已读取最新消息" }, trace: [],
+  };
+  const loaded = globalThis.onHaminnEvent({ type: "tool.result", callId: reloading.actions[0].callId, ok: true,
+    result: { value: active, revision: "active-r9" } });
+  assert.equal(loaded.actions[0].params.key, `g:${active.goalId}`);
+  const goal = globalThis.onHaminnEvent({ type: "tool.result", callId: loaded.actions[0].callId, ok: true,
+    result: { value: { goalId: active.goalId, state: "active" }, revision: "goal-r3" } });
+  assert.equal(goal.actions[0].params.key, `t:${first.taskId}`);
+  const task = globalThis.onHaminnEvent({ type: "tool.result", callId: goal.actions[0].callId, ok: true,
+    result: { value: first, revision: "task-first-r2" } });
+  assert.equal(task.actions[0].method, "data.get");
+  assert.equal(task.actions[0].params.key, `t:${second.taskId}`);
+
+  const target = globalThis.onHaminnEvent({ type: "tool.result", callId: task.actions[0].callId, ok: true,
+    result: { value: second, revision: "task-second-r4" } });
+  const handoff = target;
+  assert.equal(handoff.actions[0].method, "data.batch");
+  const operations = handoff.actions[0].params.operations;
+  const nextWrite = operations.find(operation => operation.collection === "tasks" && operation.key === `t:${second.taskId}`);
+  const activeWrite = operations.find(operation => operation.collection === "agent-runtime" && operation.key === "active-goal");
+  assert.equal(nextWrite.expectedRevision, "task-second-r4");
+  assert.equal(nextWrite.value.state, "running");
+  assert.equal(activeWrite.expectedRevision, "active-r9");
+  assert.equal(activeWrite.value.taskId, second.taskId);
+
+  const reset = globalThis.onHaminnEvent({ type: "start" });
+  globalThis.onHaminnEvent({ type: "tool.result", callId: reset.actions[0].callId, ok: true, result: null });
+});
+
+test("saving a late-result diagnostic preserves the live effect method and parameters", () => {
+  const records = new Map();
+  const provider = { baseUrl: "https://model.example", apiKey: "x".repeat(24), model: "vision-model" };
+  let activeNetworkCall = null;
+
+  function applyStore(method, params) {
+    const operations = method === "data.put" ? [{ op: "put", ...params }] : params.operations;
+    for (const operation of operations) {
+      const key = `${operation.collection}:${operation.key}`;
+      const current = records.get(key);
+      if (operation.expectedRevision === "absent" && current) {
+        throw Object.assign(new Error("revision conflict"), { code: "E_CONFLICT" });
+      }
+      if (operation.expectedRevision !== undefined && operation.expectedRevision !== "absent" &&
+          current?.revision !== operation.expectedRevision) {
+        throw Object.assign(new Error("revision conflict"), { code: "E_CONFLICT" });
+      }
+    }
+    const results = operations.map(operation => {
+      const key = `${operation.collection}:${operation.key}`;
+      const current = records.get(key);
+      if (operation.op === "delete") {
+        records.delete(key);
+        return { op: "delete", key: operation.key, deleted: !!current };
+      }
+      const revision = String(Number(current?.revision || 0) + 1);
+      records.set(key, { collection: operation.collection, key: operation.key, value: operation.value, revision });
+      return { op: "put", key: operation.key, revision };
+    });
+    return method === "data.put" ? { revision: results[0]?.revision } : { results };
+  }
+
+  const start = globalThis.onHaminnEvent({ type: "start" });
+  globalThis.onHaminnEvent({ type: "tool.result", callId: start.actions[0].callId, ok: true, result: null });
+  let output = globalThis.onHaminnEvent({ type: "goal.submit", intent: "制造迟到结果关联测试" });
+  for (let turn = 0; output?.actions?.length && turn < 80; turn += 1) {
+    const call = output.actions[0];
+    if (call.method === "network.request") {
+      activeNetworkCall = call;
+      break;
+    }
+    const result = call.method === "data.get" && call.params.key === "provider" ? { value: provider }
+      : call.method === "data.get" ? records.get(`${call.params.collection}:${call.params.key}`) || null
+        : call.method === "data.scan" ? { items: [] }
+          : ["data.put", "data.batch"].includes(call.method) ? applyStore(call.method, call.params)
+            : null;
+    output = globalThis.onHaminnEvent({ type: "tool.result", callId: call.callId, ok: true, result });
+  }
+  assert.equal(activeNetworkCall?.method, "network.request");
+
+  const stale = globalThis.onHaminnEvent({ type: "tool.result", callId: "old-epoch:w99", ok: true, result: {} });
+  assert.equal(stale.actions[0].method, "data.batch");
+  const staleSaved = globalThis.onHaminnEvent({ type: "tool.result", callId: stale.actions[0].callId,
+    ok: true, result: applyStore("data.batch", stale.actions[0].params) });
+  assert.equal(staleSaved.ignored, true);
+
+  const recovered = globalThis.onHaminnEvent({ type: "tool.result", callId: activeNetworkCall.callId,
+    ok: false, error: { code: "E_TIMEOUT", retryable: true, message: "synthetic timeout" } });
+  assert.equal(recovered.actions?.[0]?.method, "data.batch");
+
+  const reset = globalThis.onHaminnEvent({ type: "start" });
+  globalThis.onHaminnEvent({ type: "tool.result", callId: reset.actions[0].callId, ok: true, result: null });
+});
+
 function modelCall(params, decide, options = {}) {
   const body = JSON.parse(params.bodyText);
   const text = body.messages?.map(message => typeof message.content === "string" ? message.content : message.content?.map?.(part => part.text || "").join(" ")).join("\n") || "";
@@ -72,7 +237,7 @@ test("background goal persists progress and completes across screenshot cycles",
         if (item.op === "delete") records.delete(key);
         else records.set(key, { value: item.value, revision: "1" });
       }
-      return { results: [] };
+      return mockBatchResult(params);
     }
     if (method === "data.put") {
       records.set(`${params.collection}:${params.key}`, { value: params.value, revision: "1" });
@@ -214,7 +379,7 @@ test("active Goal and Task plans hydrate on Worker restart and survive later pro
         if (item.op === "delete") records.delete(key);
         else records.set(key, { value: item.value, revision: "4" });
       }
-      return { results: [] };
+      return mockBatchResult(params);
     }
     if (method === "interaction.capture") return { mime: "image/jpeg", width: 1, height: 1, dataBase64: "c3ludGhldGljLWZyYW1l" };
     if (method === "network.request") {
@@ -281,20 +446,23 @@ test("LLM-decomposed Tasks persist, run by dependency order, then return to LLM 
       .map(([key, entry]) => ({ key: key.slice(params.collection.length + 1), ...entry })) };
     if (method === "data.put" || method === "data.batch") {
       const operations = method === "data.put" ? [{ op: "put", ...params }] : params.operations;
+      const results = [];
       for (const operation of operations) {
         const key = `${operation.collection}:${operation.key}`;
         const current = records.get(key);
         if (operation.expectedRevision === "absent" && current) throw new Error(`revision conflict: ${key}`);
         if (operation.expectedRevision !== undefined && operation.expectedRevision !== "absent" &&
             current?.revision !== operation.expectedRevision) throw new Error(`revision conflict: ${key}`);
+        if (operation.op === "delete") {
+          records.delete(key);
+          results.push({ op: "delete", key: operation.key, deleted: !!current });
+        } else {
+          const revision = String(Number(current?.revision || 0) + 1);
+          records.set(key, { value: operation.value, revision });
+          results.push({ op: "put", key: operation.key, revision });
+        }
       }
-      for (const operation of operations) {
-        const key = `${operation.collection}:${operation.key}`;
-        const current = records.get(key);
-        if (operation.op === "delete") records.delete(key);
-        else records.set(key, { value: operation.value, revision: String(Number(current?.revision || 0) + 1) });
-      }
-      return { results: [] };
+      return method === "data.put" ? { revision: results[0]?.revision } : { results };
     }
     if (method === "interaction.capture") {
       captures += 1;
@@ -437,7 +605,7 @@ test("LLM requests Persona and object Memory only when relevant and HO restores 
         if (item.op === "delete") records.delete(key);
         else records.set(key, { value: item.value, revision: "2" });
       }
-      return { results: [] };
+      return mockBatchResult(params);
     }
     if (method === "interaction.capture") {
       captures += 1;
@@ -524,7 +692,7 @@ test("an EDT notification is deduplicated, matched by the LLM, and creates one s
         if (item.op === "delete") records.delete(key);
         else records.set(key, { value: item.value, revision: String(Number(records.get(key)?.revision || 0) + 1) });
       }
-      return { results: [] };
+      return mockBatchResult(params);
     }
     if (method === "data.put") {
       records.set(`${params.collection}:${params.key}`, { value: params.value, revision: "1" });
@@ -633,7 +801,7 @@ test("a recurring timer EDT persists each trigger as a separate OST and remains 
         else records.set(key, { value: operation.value,
           revision: String(Number(records.get(key)?.revision || 0) + 1) });
       }
-      return { results: [] };
+      return mockBatchResult(params);
     }
     if (method === "data.put") {
       records.set(`${params.collection}:${params.key}`, { value: params.value, revision: "1" });
@@ -776,7 +944,7 @@ test("timer EDT pause, resume and cancel fence off events from an older schedule
         else records.set(key, { value: operation.value,
           revision: String(Number(records.get(key)?.revision || 0) + 1) });
       }
-      return { results: [] };
+      return mockBatchResult(params);
     }
     if (method === "data.put") {
       records.set(`${params.collection}:${params.key}`, { value: params.value, revision: "1" });
@@ -869,7 +1037,7 @@ test("EDT controls persist before subscription effects, recover auth, and dedupl
         if (operation.op === "delete") records.delete(key);
         else records.set(key, { value: operation.value, revision: String(Number(records.get(key)?.revision || 0) + 1) });
       }
-      return { results: [] };
+      return mockBatchResult(params);
     }
     if (method === "data.put") {
       records.set(`${params.collection}:${params.key}`, { value: params.value, revision: "1" });
@@ -965,7 +1133,7 @@ test("a queued EDT cancellation is applied before startup drains old notificatio
         if (operation.op === "delete") records.delete(key);
         else records.set(key, { value: operation.value, revision: String(Number(records.get(key)?.revision || 0) + 1) });
       }
-      return { results: [] };
+      return mockBatchResult(params);
     }
     if (method === "data.put") {
       records.set(`${params.collection}:${params.key}`, { value: params.value, revision: "1" });
@@ -1040,7 +1208,7 @@ test("automatic waits are clamped to the OST deadline and expiry is saved before
     }
     if (method === "data.batch") {
       for (const item of params.operations) records.set(`${item.collection}:${item.key}`, { value: item.value, revision: "2" });
-      return { results: [] };
+      return mockBatchResult(params);
     }
     if (method === "interaction.capture") { captures += 1; return { dataBase64: "synthetic-frame" }; }
     if (method === "network.request") return modelCall(params, () => ({
@@ -1096,7 +1264,7 @@ test("host OST timeout returns to HO, which persists failure without another scr
         if (item.op === "delete") records.delete(key);
         else records.set(key, { value: item.value, revision: "2" });
       }
-      return { results: [] };
+      return mockBatchResult(params);
     }
     if (method === "interaction.capture") return { mime: "image/jpeg", dataBase64: "synthetic-frame" };
     throw new Error(`Unexpected tool before deadline-bearing effect: ${method}`);
@@ -1156,7 +1324,7 @@ test("a Worker restart recovers a dispatched Back from its prepared idempotency 
         if (item.op === "delete") records.delete(key);
         else records.set(key, { value: item.value, revision: "1" });
       }
-      return { results: [] };
+      return mockBatchResult(params);
     }
     if (method === "data.get") return params.key === "provider" ? { value: provider } : records.get(`${params.collection}:${params.key}`) || null;
     if (method === "data.scan") return { items: [] };
@@ -1238,7 +1406,7 @@ test("an unresolved navigation receipt becomes unknown and returns control to vi
   function tool(method, params) {
     if (method === "data.batch") {
       for (const item of params.operations) records.set(`${item.collection}:${item.key}`, { value: item.value, revision: "1" });
-      return { results: [] };
+      return mockBatchResult(params);
     }
     if (method === "data.get") return params.key === "provider" ? { value: provider } : records.get(`${params.collection}:${params.key}`) || null;
     if (method === "data.scan") return { items: [] };
@@ -1298,10 +1466,10 @@ test("screen effects persist a prepared receipt and require visual verification 
         if (item.op === "delete") records.delete(key);
         else records.set(key, { value: item.value, revision: "1" });
       }
-      return { results: [] };
+      return mockBatchResult(params);
     }
     if (method === "data.put") return { revision: "1" };
-    if (method === "data.get") return { value: params.key === "provider" ? provider : records.get(`${params.collection}:${params.key}`)?.value };
+    if (method === "data.get") return params.key === "provider" ? { value: provider } : records.get(`${params.collection}:${params.key}`) || null;
     if (method === "data.scan" && params.prefix === "tool-recipe:") return { items: [{
       key: "tool-recipe:synthetic-tap", revision: "5", value: {
         type: "tool-recipe", state: "active", name: "合成页面点击后复核",
@@ -1378,7 +1546,7 @@ test("input actions forward screenshot-normalized editor coordinates to the nati
   function tool(method, params) {
     if (method === "data.batch") {
       for (const item of params.operations) records.set(`${item.collection}:${item.key}`, { value: item.value, revision: "1" });
-      return { results: [] };
+      return mockBatchResult(params);
     }
     if (method === "data.put") return { revision: "1" };
     if (method === "data.get") return params.key === "provider" ? { value: provider }
@@ -1428,7 +1596,7 @@ test("input conflict codes reach CAE recovery context and guide a fresh observat
   function tool(method, params) {
     if (method === "data.batch") {
       for (const item of params.operations) records.set(`${item.collection}:${item.key}`, { value: item.value, revision: "1" });
-      return { results: [] };
+      return mockBatchResult(params);
     }
     if (method === "data.put") return { revision: "1" };
     if (method === "data.get") return params.key === "provider" ? { value: provider }
@@ -1503,7 +1671,7 @@ test("clipboard input recovery is model-selected after refocus and requires visu
   function tool(method, params) {
     if (method === "data.batch") {
       for (const item of params.operations) records.set(`${item.collection}:${item.key}`, { value: item.value, revision: "1" });
-      return { results: [] };
+      return mockBatchResult(params);
     }
     if (method === "data.put") return { revision: "1" };
     if (method === "data.get") return params.key === "provider" ? { value: provider }
@@ -1571,9 +1739,9 @@ test("the LLM may report completion with an uncertain effect and the Worker reco
   function tool(method, params) {
     if (method === "data.batch") {
       for (const item of params.operations) records.set(`${item.collection}:${item.key}`, { value: item.value, revision: "1" });
-      return { results: [] };
+      return mockBatchResult(params);
     }
-    if (method === "data.get") return { value: params.key === "provider" ? provider : records.get(`${params.collection}:${params.key}`)?.value };
+    if (method === "data.get") return params.key === "provider" ? { value: provider } : records.get(`${params.collection}:${params.key}`) || null;
     if (method === "data.put") {
       records.set(`${params.collection}:${params.key}`, { value: params.value, revision: "1" });
       return { revision: "1" };
@@ -1617,9 +1785,9 @@ test("malformed actions recover and the LLM completion judgment is stored withou
   function tool(method, params) {
     if (method === "data.batch") {
       for (const item of params.operations) records.set(`${item.collection}:${item.key}`, { value: item.value, revision: "1" });
-      return { results: [] };
+      return mockBatchResult(params);
     }
-    if (method === "data.get") return { value: params.key === "provider" ? provider : records.get(`${params.collection}:${params.key}`)?.value };
+    if (method === "data.get") return params.key === "provider" ? { value: provider } : records.get(`${params.collection}:${params.key}`) || null;
     if (method === "data.scan") return { items: [] };
     if (method === "data.put") {
       records.set(`${params.collection}:${params.key}`, { value: params.value, revision: "1" });
@@ -1692,9 +1860,9 @@ test("retryable runtime bridge failures survive Worker restart and reobserve thr
   function tool(method, params) {
     if (method === "data.batch") {
       for (const item of params.operations) records.set(`${item.collection}:${item.key}`, { value: item.value, revision: "1" });
-      return { results: [] };
+      return mockBatchResult(params);
     }
-    if (method === "data.get") return { value: params.key === "provider" ? provider : records.get(`${params.collection}:${params.key}`)?.value };
+    if (method === "data.get") return params.key === "provider" ? { value: provider } : records.get(`${params.collection}:${params.key}`) || null;
     if (method === "data.scan") {
       if (params.collection === "knowledge" && params.prefix === "experience:" && failExperienceScan) {
         failExperienceScan = false;
@@ -1774,7 +1942,7 @@ test("post-completion queue read errors are logged and retried without reopening
     if (method === "data.batch") {
       for (const operation of params.operations) records.set(`${operation.collection}:${operation.key}`,
         { value: operation.value, revision: "2" });
-      return { results: [] };
+      return mockBatchResult(params);
     }
     if (method === "worker.wait") return { waitedMs: params.ms };
     throw new Error(`Unexpected tool: ${method}`);
@@ -1838,7 +2006,7 @@ test("background queue recovery stops after bounded retries and restarts without
     if (method === "data.batch") {
       for (const operation of params.operations) records.set(`${operation.collection}:${operation.key}`,
         { value: operation.value, revision: "2" });
-      return { results: [] };
+      return mockBatchResult(params);
     }
     if (method === "worker.wait") return { waitedMs: params.ms };
     throw new Error(`Unexpected tool: ${method}`);
@@ -1897,7 +2065,7 @@ test("restarting a completed Worker resets exhausted background queue recovery w
   for (const operation of loaded.actions[0].params.operations) records.set(`${operation.collection}:${operation.key}`,
     { value: operation.value, revision: "2" });
   const saved = globalThis.onHaminnEvent({ type: "tool.result", callId: loaded.actions[0].callId, ok: true,
-    result: { results: [] } });
+    result: mockBatchResult(loaded.actions[0].params) });
 
   assert.equal(saved.state, "done");
   assert.equal(saved.startup, true);
@@ -1954,7 +2122,7 @@ test("failure to read a durable goal receipt interrupts delivery before acknowle
       }
       return null;
     }
-    if (method === "data.batch") return { results: [] };
+    if (method === "data.batch") return mockBatchResult(params);
     throw new Error(`Unexpected tool: ${method}`);
   }
 
@@ -2007,7 +2175,7 @@ test("recovery gives the model pending operation details and does not replay an 
     }
     if (method === "data.batch") {
       for (const item of params.operations) records.set(`${item.collection}:${item.key}`, { value: item.value, revision: "2" });
-      return { results: [] };
+      return mockBatchResult(params);
     }
     if (method === "interaction.capture") return { mime: "image/jpeg", dataBase64: "c3ludGhldGljLWZyYW1l" };
     if (method === "network.request") {
@@ -2105,11 +2273,11 @@ test("an already-running Worker accepts an explicit resume event for a paused Go
   const modelRequests = [];
 
   function tool(method, params) {
-    if (method === "data.get") { calls.push(`get:${params.key}`); return { value: params.key === "provider" ? provider : records.get(`${params.collection}:${params.key}`)?.value }; }
+    if (method === "data.get") { calls.push(`get:${params.key}`); return params.key === "provider" ? { value: provider } : records.get(`${params.collection}:${params.key}`) || null; }
     if (method === "data.put") { records.set(`${params.collection}:${params.key}`, { value: params.value, revision: "2" }); return { revision: "2" }; }
     if (method === "data.batch") {
       for (const item of params.operations) records.set(`${item.collection}:${item.key}`, { value: item.value, revision: "2" });
-      return { results: [] };
+      return mockBatchResult(params);
     }
     if (method === "data.scan") return { items: [] };
     if (method === "interaction.capture") { captures += 1; calls.push("capture"); return { mime: "image/jpeg", dataBase64: "synthetic-frame" }; }
@@ -2156,7 +2324,7 @@ test("action loop timeout invokes LLM review and can extend the current action l
     if (method === "interaction.capture") { captures += 1; return { dataBase64: "synthetic" }; }
     if (method === "data.batch") {
       for (const item of params.operations) records.set(`${item.collection}:${item.key}`, { value: item.value, revision: "5" });
-      return { results: [] };
+      return mockBatchResult(params);
     }
     if (method === "network.request") {
       const body = JSON.parse(params.bodyText);
@@ -2207,7 +2375,7 @@ test("an action response arriving after the AL budget is reviewed before any new
     if (method === "data.put") { records.set(`${params.collection}:${params.key}`, { value: params.value, revision: "2" }); return { revision: "2" }; }
     if (method === "data.batch") {
       for (const item of params.operations) records.set(`${item.collection}:${item.key}`, { value: item.value, revision: "2" });
-      return { results: [] };
+      return mockBatchResult(params);
     }
     if (method === "interaction.capture") { captures += 1; return { mime: "image/jpeg", dataBase64: "synthetic-frame" }; }
     if (method === "interaction.tap") { taps += 1; return { accepted: true }; }
@@ -2267,7 +2435,7 @@ test("LLM can start a new action loop after timeout and choose a reusable experi
     if (method === "data.put") { records.set(`${params.collection}:${params.key}`, { value: params.value, revision: "5" }); return { revision: "5" }; }
     if (method === "data.batch") {
       for (const item of params.operations) records.set(`${item.collection}:${item.key}`, { value: item.value, revision: "5" });
-      return { results: [] };
+      return mockBatchResult(params);
     }
     if (method === "interaction.capture") return { mime: "image/jpeg", dataBase64: "synthetic-frame" };
     if (method === "network.request") return modelCall(params, () => ({ state: "done", evidence: "LLM 根据最终画面判断任务已完成" }), {
@@ -2345,7 +2513,7 @@ test("the 30-minute deadline records an in-flight navigation receipt then stops 
     if (method === "data.scan") return { items: [] };
     if (method === "data.batch") {
       for (const item of params.operations) records.set(`${item.collection}:${item.key}`, { value: item.value, revision: "2" });
-      return { results: [] };
+      return mockBatchResult(params);
     }
     if (method === "interaction.capture") { captures += 1; return { dataBase64: "synthetic" }; }
     if (method === "network.request") { modelCalls += 1; return modelCall(params, () => ({ state: "done", evidence: "done" })); }
@@ -2385,10 +2553,10 @@ test("non-retryable model authorization errors stop automatic retries and preser
     calls.push(method);
     if (method === "data.batch") {
       for (const item of params.operations) records.set(`${item.collection}:${item.key}`, { value: item.value, revision: "1" });
-      return { results: [] };
+      return mockBatchResult(params);
     }
     if (method === "data.put") { records.set(`${params.collection}:${params.key}`, { value: params.value, revision: "1" }); return { revision: "1" }; }
-    if (method === "data.get") return { value: params.key === "provider" ? provider : records.get(`${params.collection}:${params.key}`)?.value };
+    if (method === "data.get") return params.key === "provider" ? { value: provider } : records.get(`${params.collection}:${params.key}`) || null;
     if (method === "data.scan") return { items: [] };
     if (method === "interaction.capture") return { mime: "image/jpeg", dataBase64: "synthetic-frame" };
     if (method === "network.request") return { status: 401, bodyText: "unauthorized" };
@@ -2458,7 +2626,7 @@ test("all Worker model purposes can consume a response stored as a Haminn file",
         if (item.op === "delete") records.delete(key);
         else records.set(key, { value: item.value, revision: "1" });
       }
-      return { results: [] };
+      return mockBatchResult(params);
     }
     if (method === "data.put") {
       records.set(`${params.collection}:${params.key}`, { value: params.value, revision: "1" });
@@ -2516,12 +2684,12 @@ test("all Worker model purposes can consume a response stored as a Haminn file",
 test("priority user cancel is handled before Worker startup and clears every queued OST", async () => {
   await import(`./worker.mjs?goal-control=${Date.now()}`);
   const records = new Map();
-  records.set("agent-runtime:active-goal", { revision: 8, value: {
+  records.set("agent-runtime:active-goal", { revision: "8", value: {
     goalId: "g-control", taskId: "t-control", intent: "完成合成目标", state: "active",
     revision: 4, step: 3, journalSequence: 0, trace: [], waiting: null,
   } });
-  records.set("goals:g:g-control", { revision: 12, value: { goalId: "g-control", state: "active", revision: 4 } });
-  records.set("tasks:t:t-control", { revision: 20, value: { taskId: "t-control", state: "running", revision: 4 } });
+  records.set("goals:g:g-control", { revision: "12", value: { goalId: "g-control", state: "active", revision: 4 } });
+  records.set("tasks:t:t-control", { revision: "20", value: { taskId: "t-control", state: "running", revision: 4 } });
   for (let index = 0; index < 105; index += 1) {
     records.set(`inbox:q:${String(index).padStart(3, "0")}`, { revision: 1,
       value: { type: "goal.submit", intent: `synthetic ${index}`, state: "queued" } });
@@ -2541,13 +2709,7 @@ test("priority user cancel is handled before Worker startup and clears every que
             (operation.expectedRevision !== undefined && operation.expectedRevision !== "absent" &&
               current?.revision !== operation.expectedRevision)) throw new Error(`revision conflict: ${key}`);
       }
-      for (const operation of operations) {
-        const key = `${operation.collection}:${operation.key}`;
-        const current = records.get(key);
-        if (operation.op === "delete") records.delete(key);
-        else records.set(key, { value: operation.value, revision: Number(current?.revision || 0) + 1 });
-      }
-      return { results: [] };
+      return persistMockBatch(records, { operations });
     }
     throw new Error(`Unexpected tool: ${method}`);
   }
@@ -2586,6 +2748,7 @@ test("priority user cancel is handled before Worker startup and clears every que
 
 test("Worker restart resumes dependency scheduling after a durable task-done decision", async () => {
   await import(`./worker.mjs?task-done-restart=${Date.now()}`);
+  const now = Date.now();
   const first = { taskId: "task-restart-first", runId: "run-first", objective: "读取最新消息", kind: "screen-work",
     state: "done", dependencies: [], objectKey: null, revision: 2, createdAt: 10, planIndex: 0, progress: "已读取" };
   const second = { taskId: "task-restart-second", runId: "run-second", objective: "核对回复结果", kind: "screen-work",
@@ -2593,7 +2756,7 @@ test("Worker restart resumes dependency scheduling after a durable task-done dec
   const active = {
     goalId: "goal-task-done-restart", taskId: first.taskId, runId: first.runId,
     intent: "读取新消息并核对回复", state: "active", taskType: "one-shot", taskKind: "OST",
-    step: 2, revision: 5, createdAt: 10, progress: "已读取",
+    step: 2, revision: 5, createdAt: now, goalAttemptStartedAt: now, goalDeadlineAt: now + 30 * 60_000, progress: "已读取",
     goalPlan: { scope: {}, triggers: [], completion: "LLM 判断", priority: 0, acceptedBoundary: "after-creation" },
     taskPlan: { dependencies: first.dependencies, objectKey: first.objectKey }, taskRecordKind: first.kind,
     taskObjective: first.objective, taskReviewMode: false,
@@ -2605,11 +2768,16 @@ test("Worker restart resumes dependency scheduling after a durable task-done dec
   assert.equal(start.actions[0].method, "data.get");
   const resumed = globalThis.onHaminnEvent({ type: "tool.result", callId: start.actions[0].callId, ok: true,
     result: { value: active, revision: "1" } });
-  assert.equal(resumed.actions[0].method, "data.batch");
-  const operations = resumed.actions[0].params.operations;
+  assert.equal(resumed.actions[0].method, "data.get");
+  assert.equal(resumed.actions[0].params.key, `t:${second.taskId}`);
+  const handedOff = globalThis.onHaminnEvent({ type: "tool.result", callId: resumed.actions[0].callId, ok: true,
+    result: { value: second, revision: "task-next-r4" } });
+  assert.equal(handedOff.actions[0].method, "data.batch");
+  const operations = handedOff.actions[0].params.operations;
   const nextTask = operations.find(item => item.collection === "tasks" && item.key === `t:${second.taskId}`)?.value;
   const savedActive = operations.find(item => item.collection === "agent-runtime" && item.key === "active-goal")?.value;
-  assert.equal(nextTask.state, "running");
+  assert.equal(nextTask?.state, "running", JSON.stringify(operations));
+  assert.equal(operations.find(item => item.collection === "tasks" && item.key === `t:${second.taskId}`)?.expectedRevision, "task-next-r4");
   assert.equal(savedActive.taskId, second.taskId);
   assert.equal(savedActive.lastDecision, null);
 });
@@ -2633,10 +2801,10 @@ test("goal cancellation updates all unfinished decomposed Tasks in the same HO t
       ] },
     trace: [],
   };
-  records.set("agent-runtime:active-goal", { value: active, revision: 1 });
-  records.set("goals:g:goal-graph-cancel", { value: { goalId: active.goalId, state: "active", revision: 4 }, revision: 8 });
-  records.set("tasks:t:task-graph-current", { value: { ...active.taskGraph.tasks[0] }, revision: 2 });
-  records.set("tasks:t:task-graph-next", { value: { ...active.taskGraph.tasks[1] }, revision: 2 });
+  records.set("agent-runtime:active-goal", { value: active, revision: "1" });
+  records.set("goals:g:goal-graph-cancel", { value: { goalId: active.goalId, state: "active", revision: 4 }, revision: "8" });
+  records.set("tasks:t:task-graph-current", { value: { ...active.taskGraph.tasks[0] }, revision: "2" });
+  records.set("tasks:t:task-graph-next", { value: { ...active.taskGraph.tasks[1] }, revision: "2" });
   records.set("tasks:t:task-graph-coordinator", { value: {
     schemaVersion: 1, taskId: "task-graph-coordinator", goalId: active.goalId, runId: "run-coordinator",
     revision: 2, kind: "coordination", objective: active.intent, state: "waiting",
@@ -2646,14 +2814,7 @@ test("goal cancellation updates all unfinished decomposed Tasks in the same HO t
   function tool(method, params) {
     if (method === "data.get") return records.get(`${params.collection}:${params.key}`) || null;
     if (method === "data.scan") return { items: [] };
-    if (method === "data.batch") {
-      for (const operation of params.operations) {
-        const key = `${operation.collection}:${operation.key}`;
-        const current = records.get(key);
-        records.set(key, { value: operation.value, revision: Number(current?.revision || 0) + 1 });
-      }
-      return { results: [] };
-    }
+    if (method === "data.batch") return persistMockBatch(records, params);
     throw new Error(`Unexpected tool: ${method}`);
   }
   let output = globalThis.onHaminnEvent({ type: "goal.control", eventId: "cancel-graph", command: "cancel" });

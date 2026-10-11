@@ -27,7 +27,7 @@
 |---|---|---|
 | [agent/worker.mjs](../agent/worker.mjs) | 生产后台入口与 effect/result 状态机；串联 OST/EDT/AL、屏幕交互、CAE、学习与持久事件日志 | 仍是较大的生命周期协调器；进一步拆分必须围绕稳定 effect/result 合同，不能再增加第二套运行路径 |
 | [agent/ho/](../agent/ho/)、[agent/cae/](../agent/cae/)、[agent/me/](../agent/me/)、[agent/sm/](../agent/sm/)、[agent/te/](../agent/te/) | 生命周期、上下文组装、Memory/Persona、工具目录与检索的纯模块 | 有界关键词检索不是语义检索；真实场景中的提示质量、恢复策略与经验复用尚未验收 |
-| [agent/storage/journaled-write.mjs](../agent/storage/journaled-write.mjs) | 在 Worker 的 effect 写入中合并操作日志，并保留 CAS 条件 | 仅收敛日志包装这一条适配；Worker 尚未跟踪所有业务记录的 Host revision，也没有统一的 CAS 冲突重读/恢复流程 |
+| [agent/storage/](../agent/storage/) | 日志与状态批次适配；记录 `active-goal`、Goal、Task 的 Host revision，并为已知版本的写操作附加 CAS | EDT 记录与其他业务集合尚未纳入 revision ledger；CAS 冲突恢复需继续验证长期运行与更多生命周期边界 |
 | （§10.41 已删除）早期 `agent/model.mjs`、`agent/store.mjs` | Promise 式 Goal/Task 存储原型 | 仅有模拟测试曾引用；删除以避免与 Worker effect/result 主路径形成双轨 |
 | [app.js](../app.js) 与 [ui/](../ui/) | 指令、状态展示、生命周期控制事件投递，以及用户管理 IC/BP/Memory/TE | UI 控制只投递给 HO；UI 与 Worker 各自维护的记录仍需保持明确所有权和 revision 约束 |
 | [agent/worker.test.mjs](../agent/worker.test.mjs) 与模块测试 | 纯状态机、记录、检索和 Worker effect 流程自动验证 | Node 模拟不能证明 Haminn QuickJS 多模块加载、宿主续调度或真机 EDT/目标应用行为 |
@@ -35,7 +35,7 @@
 
 需要优先处理的通用缺陷：
 
-1. **生产存储仍未完全收敛**：生命周期由 Worker 单一路径写入，UI 用控制事件表达 pause/resume/cancel；旧 Promise 原型已删除。Worker 仍需在生产 effect/result 路径中统一记录 revision、为状态批次设置 CAS，并在 `E_CONFLICT` 时基于最新持久状态协调，而不能盲目重写或把并发冲突当成普通 I/O 重试。
+1. **生产存储仍未完全收敛**：生命周期由 Worker 单一路径写入，UI 用控制事件表达 pause/resume/cancel；旧 Promise 原型已删除。Worker 已对活动 OST、Goal 和 Task 记录 CAS；EDT 与其他可变集合还没有相同保护，需纳入适合其语义的冲突重读/协调路径，不能盲目重写或把并发冲突当成普通 I/O 重试。
 2. **宿主与真机连续运行尚未验收**：代码具备 AL 到期复盘、OST 硬期限传递、持久日志、Host notification/timer 接入和队列恢复路径；仍需在 CMA-AN00 验证多轮 effect 续调度、HTTP/Bridge 取消、暂停/取消抢占、系统进程重建和事件去重的真实行为。
 3. **检索规模与语义仍有限**：ME、BP、TE 当前依赖有界扫描和轻量关键词重合；需要用实际任务验证现有简单排序够不够，再决定是否补轻量分页/索引，不预设外部向量服务。
 4. **恢复闭环需要场景证据**：模型能看到日志、失败信号和未决操作，并由 LLM 选择续做/换路；还要覆盖错误截图、错误操作、页面加载异常、重启和结果不确定时是否能继续，而非只看最终状态。
@@ -620,6 +620,14 @@ JS 测试适合纯状态与组装；QuickJS/Android 仪器测试负责真实模�
 - 删除该未接线原型及仅验证它的 `agent/model.test.mjs`，保留 Worker 使用的 `agent/ho/task-plan.mjs` 结构校验、HO 生命周期测试和 storage effect 适配。未删除 Haminn 数据，也未更改运行时接口；README 与当前代码盘点改为描述实际主路径。
 - 删除后全量 `node --test` 130/130 通过；`app.js`、Worker、Task 计划和 storage effect 语法检查及 `git diff --check` 通过。Haminn DEV watcher 已同步当前树至 revision 1275，但 `targetReady=false`、runtime `not-visible`；ADB 仅枚举 `emulator-5554`，未取得手机行为证据。
 - 这是死代码收敛，不等于完成 U0。当前生产 Worker 仍未对所有生命周期批次持续跟踪 Host revision，也未定义 CAS 冲突后的重新读取与 LLM/HO 协调方式；必须作为下一项存储工作处理，避免盲目重试状态覆盖。
+
+### 10.42 Worker 生命周期 revision 跟踪与 CAS 冲突恢复（2026-10-11）
+
+- 新增 `agent/storage/revisions.mjs`，从成功的 Haminn `data.get/scan/put/batch` 结果跟踪 `agent-runtime:active-goal`、`goals` 与 `tasks` 的 revision；对随后写入附加已确认版本，保留显式调用条件。只有明确读取到“不存在”或确认删除才记为 `absent`，缺失/畸形 revision 不会被猜成不存在；若 Host 对生命周期记录返回缺失 revision，Worker 将此作为存储合同错误中止，避免退化成无条件写入。
+- 当包含这些生命周期记录的原子批次返回 `E_CONFLICT`，Worker 不重放旧批次；它清除该失败快照尚未提交的日志条目，重新读取活动 OST、Goal 与 Task，再按持久状态恢复现有 HO 流程。暂停、等待和终态保持原状态；连续三次冲突仍无法推进时向宿主返回可重试的持久化错误。该恢复只处理生命周期记录，不替 LLM 判断任务结果。
+- 回看 Task-done 的持久化边界时发现，冲突恢复如果直接重新观察屏幕会重复已完成子 Task；Worker 重启后调度下一 Task 时也可能没有读取该行的 Host revision。本次让冲突恢复沿用 HO 的 task-done handoff，并在写入待调度 Task 前补读其 revision；关键恢复读取失败明确作为持久化错误返回。
+- 新增单测验证 revision 收集、CAS 注入、显式条件保留和错误 Host 结果处理；Worker 集成测试覆盖 CAS 冲突后在 Task-done 边界继续调度、为下一 Task 读取并附加 CAS，以及迟到结果记日志后恢复原活动 effect 的方法/参数。全量 `node --test` 139/139 通过，Worker/模块/入口语法检查及 `git diff --check` 通过。DEV 树已同步至 revision 1288，但 `targetReady=false`、runtime `not-visible`；ADB 仍只显示 `emulator-5554`，本节没有真机行为验收证据。
+- 当前 CAS 范围仍不包括 `event-tasks` 等 EDT 记录；EDT 的事件 receipt/任务状态冲突需要按事件 ID 幂等规则单独恢复，不能把它们直接归并到活动 OST 重载逻辑。
 
 ## 11. 交付与完成判定
 
