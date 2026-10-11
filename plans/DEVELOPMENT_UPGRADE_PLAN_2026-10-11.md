@@ -702,6 +702,12 @@ JS 测试适合纯状态与组装；QuickJS/Android 仪器测试负责真实模�
 - 失败分布为 `ActivitySmokeTest` 9 项（语言/开发密码/导航和页面断言）、`AgentDevelopmentTest` 3 项（代理事件与 DEV 回执断言）、`PersistenceInstrumentedTest` 1 项（测试尝试向 localhost 下载包，被生产 SSRF 防护拒绝）、`ScreenCaptureInstrumentedTest` 4 项。其中 3 项因该 API 37 instrumentation 的 UiAutomation 未连接而无法读取系统窗口；另 1 项实际发现 `runtime.capabilities` 的 screen `features` 未暴露测试期望的 `audioModes`，需要核对该通用屏幕能力描述合同。它与 ImHamster 当前调用的 `screen.interaction` 不同，未在本轮扩展修复。
 - 本节记录了失败分类和当前运行态，不能将整套 Haminn 仪器测试称为全绿。上述绿项只证明模拟器上的宿主执行/续调度/事件路径；17 项失败仍需在目标归属的独立 Haminn 任务中按其合同逐项处理或确认测试假设，真机功能和微信场景仍须 CMA-AN00 证据。
 
+### 10.54 DEV 源码已同步但 Haminn 没有前台 Activity（2026-10-11）
+
+- 当前 LAN DEV 服务可达，开发 watcher 存活，ImHamster 源码树已同步至 revision 1448；但 `targetReady=false` 且 runtime `not-visible`。使用同一现有实例执行一次 `prepare-dir --sync-policy continue` 后，revision 到 1449、文件树未变化，仍返回 `prepared=false`、`refreshState=not-visible`、无 render operation，页面不可见。
+- 对 `haminn_get_page_state` 的直接读取返回 `E_OPERATION_FAILED: Haminn has no foreground activity`。这将当前同步后的阻塞定位为 Haminn 没有可处理页面的前台 Activity；DEV 网络、认证、实例绑定和本地源码上传均已有服务端证据。ADB 此刻仍只枚举 API 37 模拟器，无法由本机启动手机上的 Haminn。需要手机端先显示 Haminn，或恢复 USB 调试/RSA 授权；随后再复用现有 watcher 完成 DEV 页面和 ImHamster 真机运行验证。
+- 本次只验证 Haminn DEV/运行态，不涉及目标 App 操作，不构成 ImHamster 真机、无障碍、Worker、模型或微信行为验收；不能据此标记设备验收通过，也不因此修改 ImHamster 执行逻辑。
+
 ## 11. 交付与完成判定
 
 ImHamster 与 Haminn 独立提交、验证和推送；每次提交前核对各自 Git 根与 origin，保留无关工作区改动。宿主新增合同需同步 SDK/能力文档/实际实现，消费者只接入确实支持的能力。
