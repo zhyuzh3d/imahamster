@@ -368,7 +368,6 @@ function requestActionLoopReview(frame) {
     { role: "system", content: SYSTEM_PROMPT },
     { role: "user", content: [
       { type: "text", text: `${contextText()}\n本 AL 已到预算检查点。超时不是失败，也不结束当前 OST。请结合最新截图、已执行步骤、重复/无进展情况，选择：continue（增加当前 AL 时间并继续；续时后本 AL 总预算不得超过 30 分钟）、new-action-loop（结束本 AL，保存现场，先估算再以新 AL 继续同一个 OST）、restart（忽略旧的执行上下文，以新 AL 从当前可见现场重新开始这个 OST）。所有选择仍受同一 OST 的 30 分钟总时限约束。你自行权衡任何未核实外部操作的影响并作出选择；系统会保留未决操作记录供你判断，不替你选择路线。必须选择能推进目标的策略。只返回 JSON：{"choice":"continue|new-action-loop|restart","additionalMinutes":5,"reason":"...","nextStrategy":"..."}` },
-      { type: "text", text: `补充的上下文请求格式：如果当前截图显示了具体联系人/对象，而且这项沟通明显需要其历史信息、当前上下文没有对应记忆，先只返回 JSON {"state":"context","evidence":"截图可见对象及请求原因","contextRequest":{"memoryObjectRefs":["contact:截图中准确名称"]}}；不要同时给动作或猜测对象名称。最多请求 8 个准确 objectRef；已查询过的范围不要重复请求。若无法确认对象或不需要对象记忆，按原动作格式继续。` },
       { type: "image_url", image_url: { url: `data:${frame.mime || "image/jpeg"};base64,${frame.dataBase64}` } },
     ] },
   ];
@@ -915,7 +914,7 @@ function providerRequest(frame) {
   const messages = [
     { role: "system", content: SYSTEM_PROMPT },
     { role: "user", content: [
-      { type: "text", text: `截图尺寸 ${frame.width}x${frame.height} 像素；坐标原点为整张截图左上角，归一化 x=屏幕像素x/截图宽度、y=屏幕像素y/截图高度；input 坐标必须落在可见输入框矩形中央，不能落在键盘区域。${contextText()}\n结合当前截图、用户目标和完整操作进展自行决定下一步。对“最新/是否存在/条件是否满足”作判断时，确认截图中的目标区域完整且未被键盘、菜单、弹窗遮挡；若目标列表可能还有未显示的较新内容，先滚动到最新位置或关闭遮挡并重新截图。你负责判断目标是否完成；完成时输出 done，并用 evidence 简要记录你的自我判断依据，系统会按原样保存，不做二次验收。动作坐标使用 0 到 1 的归一化坐标，input 必须提供截图中目标输入框中心的 x/y。等待模型期间菜单或布局可能变化，所有动作和坐标都必须依据本轮截图，菜单已消失时先重新观察。若存在上一步待核实操作，说明你对其结果的判断：verified、not-executed 或 unknown。格式：{"state":"action|wait|ask|done|stop","evidence":"你的进展、决定或完成判断依据","operationResult":"verified|not-executed|unknown","action":{"type":"tap|swipe|input|back|home","target":"目标","label":"按钮文字","x":0,"y":0,"fromX":0,"fromY":0,"toX":0,"toY":0,"durationMs":400,"text":"输入文本","mode":"replace","focused":true,"effect":"none|send|submit|publish|friend-add|external","visibleTarget":"截图中的对象","visibleContent":"截图中的完整正文"},"waitMs":5000,"question":"","reason":""}` },
+      { type: "text", text: `截图尺寸 ${frame.width}x${frame.height} 像素；坐标原点为整张截图左上角，归一化 x=屏幕像素x/截图宽度、y=屏幕像素y/截图高度；input 坐标必须落在可见输入框矩形中央，不能落在键盘区域。${contextText()}\n结合当前截图、用户目标和完整操作进展自行决定下一步。对“最新/是否存在/条件是否满足”作判断时，确认截图中的目标区域完整且未被键盘、菜单、弹窗遮挡；若目标列表可能还有未显示的较新内容，先滚动到最新位置或关闭遮挡并重新截图。你负责判断目标是否完成；完成时输出 done，并用 evidence 简要记录你的自我判断依据，系统会按原样保存，不做二次验收。动作坐标使用 0 到 1 的归一化坐标，input 必须提供截图中目标输入框中心的 x/y。等待模型期间菜单或布局可能变化，所有动作和坐标都必须依据本轮截图，菜单已消失时先重新观察。若当前截图识别出具体对象，且任务需要其历史背景但尚无对应 Memory，可请求精确对象范围的补充上下文：只返回 state=context、截图证据和 contextRequest.memoryObjectRefs；不得猜测对象名称，也不得同时请求记忆并给动作。每次最多请求 8 个范围，已查询范围不要重复请求；HO 查询后会重新截图。若存在上一步待核实操作，说明你对其结果的判断：verified、not-executed 或 unknown。格式：{"state":"action|context|wait|ask|done|stop","evidence":"你的进展、决定或完成判断依据","operationResult":"verified|not-executed|unknown","contextRequest":{"memoryObjectRefs":["contact:准确名称"]},"action":{"type":"tap|swipe|input|back|home","target":"目标","label":"按钮文字","x":0,"y":0,"fromX":0,"fromY":0,"toX":0,"toY":0,"durationMs":400,"text":"输入文本","mode":"replace","focused":true,"effect":"none|send|submit|publish|friend-add|external","visibleTarget":"截图中的对象","visibleContent":"截图中的完整正文"},"waitMs":5000,"question":"","reason":""}` },
       { type: "image_url", image_url: { url: `data:${frame.mime || "image/jpeg"};base64,${frame.dataBase64}` } },
     ] },
   ];

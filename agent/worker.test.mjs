@@ -234,6 +234,8 @@ test("LLM can request exact object memory and HO recovers that request after a W
   assert.equal(captures, 3, "the model should inspect a fresh screenshot after ME returns context");
   assert.equal(memoryScans, 2, "a duplicate context request must not repeat the memory scan");
   assert.doesNotMatch(actionPrompts[0], /张三喜欢周末徒步/);
+  assert.match(actionPrompts[0], /state=context/);
+  assert.match(actionPrompts[0], /contextRequest\.memoryObjectRefs/);
   assert.match(actionPrompts[1], /张三喜欢周末徒步/);
   assert.match(actionPrompts[1], /contact:张三/);
   assert.match(actionPrompts[2], /本次 OST 已达到/);
