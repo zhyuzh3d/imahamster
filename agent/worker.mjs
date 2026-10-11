@@ -30,7 +30,7 @@ import {
   GLOBAL_ACTION_INITIAL_WAIT_MS,
   GLOBAL_ACTION_POLL_WAIT_MS,
 } from "./ho/global-action-receipts.mjs";
-import { assertEventId, createEventReceipt, eventReceiptKey } from "./ho/events.mjs";
+import { assertEventId, assertEventReceiptIdentity, createEventReceipt, eventReceiptKey } from "./ho/events.mjs";
 import { prepareUserControlTransition } from "./ho/control.mjs";
 import { createTaskGraph, nextReadySubtask, setSubtaskState } from "./ho/task-plan.mjs";
 import { applyCurrentOperationOutcome, ensurePendingOperationHistory, rememberPendingOperation } from "./ho/operations.mjs";
@@ -66,7 +66,8 @@ const MAX_POST_TASK_QUEUE_RECOVERY_ATTEMPTS = 8;
 const MAX_STORAGE_CONFLICT_RECOVERIES = 3;
 const GOAL_CONTROL_CONFLICT_STAGES = new Set(["goal-control-queue-page-saved", "goal-control-final-saved"]);
 const EVENT_INBOX_REPLAY_STAGES = new Set([
-  "event-match-settled", "event-match-trigger-created", "timer-event-settled", "timer-trigger-created",
+  "notification-event-saved", "timer-event-saved", "event-match-settled", "event-match-trigger-created",
+  "timer-event-settled", "timer-trigger-created",
 ]);
 const DEFAULT_ACTION_LOOP_BUDGET_MINUTES = 15;
 const MAX_ACTION_LOOP_BUDGET_MINUTES = 30;
@@ -87,6 +88,7 @@ const CRITICAL_STATE_READ_STAGES = new Set([
   "event-task-subscription-conflict-goal-read",
   "event-task-subscription-conflict-task-record-read", "event-task-subscription-conflict-active-read",
   "goal-control-conflict-receipt-read", "goal-control-conflict-active-read",
+  "event-intake-conflict-receipt-read",
   "goal-submit-receipt-read", "notification-receipt-read", "timer-receipt-read",
   "event-task-control-receipt-read", "event-task-control-task-read",
   "goal-control-receipt-read", "goal-control-active-read", "goal-control-goal-read", "goal-control-task-read",
@@ -287,6 +289,20 @@ function beginStorageConflictRecovery(error, method, failedStage) {
     storageConflictContext.kind = "goal-control";
     pending = "goal-control-conflict-receipt-read";
     return action("data.get", { collection: COLLECTION, key: eventReceiptKey(pendingGoalControl.eventId) });
+  }
+  if (stage === "notification-event-saved" && pendingNotificationEvent) {
+    storageConflictContext.kind = "event-intake";
+    storageConflictContext.eventType = "notification.posted";
+    storageConflictContext.eventId = pendingNotificationEvent.eventId;
+    pending = "event-intake-conflict-receipt-read";
+    return action("data.get", { collection: COLLECTION, key: eventReceiptKey(pendingNotificationEvent.eventId) });
+  }
+  if (stage === "timer-event-saved" && pendingTimerEvent) {
+    storageConflictContext.kind = "event-intake";
+    storageConflictContext.eventType = "timer.fired";
+    storageConflictContext.eventId = pendingTimerEvent.eventId;
+    pending = "event-intake-conflict-receipt-read";
+    return action("data.get", { collection: COLLECTION, key: eventReceiptKey(pendingTimerEvent.eventId) });
   }
   if (["create-goal", "queue-saved"].includes(stage) && pendingGoalRegistration) {
     storageConflictContext.kind = "goal-registration";
@@ -1100,7 +1116,6 @@ function saveNotificationEvent() {
     record("inbox", key, { ...event, state: "received", receivedAt: now }),
     record(COLLECTION, eventReceiptKey(event.eventId), receipt),
   ];
-  pendingNotificationEvent = null;
   pending = "notification-event-saved";
   return action("data.batch", { operations });
 }
@@ -1125,7 +1140,6 @@ function saveTimerEvent() {
     record("inbox", key, { ...event, state: "received", receivedAt: now }),
     record(COLLECTION, eventReceiptKey(event.eventId), receipt),
   ];
-  pendingTimerEvent = null;
   pending = "timer-event-saved";
   return action("data.batch", { operations });
 }
@@ -2287,6 +2301,21 @@ function advanceAfterTool(event) {
       pending = "storage-conflict-active-read";
       return action("data.get", { collection: COLLECTION, key: ACTIVE_KEY });
     }
+    case "event-intake-conflict-receipt-read": {
+      const context = storageConflictContext;
+      const event = context?.eventType === "notification.posted" ? pendingNotificationEvent
+        : context?.eventType === "timer.fired" ? pendingTimerEvent : null;
+      if (!event || event.eventId !== context.eventId) throw new Error("EDT 入箱冲突恢复缺少原始事件");
+      if (result?.value) {
+        assertEventReceiptIdentity(result.value, event.eventId, context.eventType);
+        if (context.eventType === "notification.posted") pendingNotificationEvent = null;
+        else pendingTimerEvent = null;
+        storageConflictContext = null;
+        return { state: state?.state || "idle", duplicate: true, eventId: event.eventId, receipt: result.value };
+      }
+      storageConflictContext = null;
+      return context.eventType === "notification.posted" ? saveNotificationEvent() : saveTimerEvent();
+    }
     case "goal-control-active-read": {
       const control = pendingGoalControl;
       if (!control) throw new Error("用户任务控制上下文已丢失");
@@ -2324,7 +2353,10 @@ function advanceAfterTool(event) {
       const incoming = pendingGoalSubmit;
       pendingGoalSubmit = null;
       if (!incoming) throw new Error("目标事件收据检查缺少原始事件");
-      if (result?.value) return { state: state?.state || "idle", duplicate: true, eventId: incoming.eventId };
+      if (result?.value) {
+        assertEventReceiptIdentity(result.value, incoming.eventId, "goal.submit");
+        return { state: state?.state || "idle", duplicate: true, eventId: incoming.eventId };
+      }
       pendingGoalRegistration = { intent: incoming.intent, eventId: incoming.eventId };
       if (state && !terminal(state.state)) return enqueueGoal(incoming.intent, incoming.eventId);
       const operations = makeGoalAndTask(incoming.intent, incoming.eventId);
@@ -2343,6 +2375,7 @@ function advanceAfterTool(event) {
     case "notification-receipt-read": {
       if (!pendingNotificationEvent) throw new Error("通知回执检查缺少原始事件");
       if (result?.value) {
+        assertEventReceiptIdentity(result.value, pendingNotificationEvent.eventId, "notification.posted");
         const duplicate = pendingNotificationEvent.eventId;
         pendingNotificationEvent = null;
         return { state: state?.state || "idle", duplicate: true, eventId: duplicate };
@@ -2350,12 +2383,14 @@ function advanceAfterTool(event) {
       return saveNotificationEvent();
     }
     case "notification-event-saved": {
+      pendingNotificationEvent = null;
       if (state && !terminal(state.state)) return { state: state.state, notificationQueued: true };
       return readNextQueuedGoal();
     }
     case "timer-receipt-read": {
       if (!pendingTimerEvent) throw new Error("计时事件回执检查缺少原始事件");
       if (result?.value) {
+        assertEventReceiptIdentity(result.value, pendingTimerEvent.eventId, "timer.fired");
         const duplicate = pendingTimerEvent.eventId;
         pendingTimerEvent = null;
         return { state: state?.state || "idle", duplicate: true, eventId: duplicate };
@@ -2363,6 +2398,7 @@ function advanceAfterTool(event) {
       return saveTimerEvent();
     }
     case "timer-event-saved": {
+      pendingTimerEvent = null;
       if (state && !terminal(state.state)) return { state: state.state, timerQueued: true };
       return readNextQueuedGoal();
     }

@@ -10,6 +10,15 @@ export function eventReceiptKey(eventId) {
   return `event:${fnv1a64(value)}`;
 }
 
+export function assertEventReceiptIdentity(receipt, eventId, type) {
+  const expectedId = assertEventId(eventId);
+  const expectedType = String(type || "unknown").slice(0, 80);
+  if (!receipt || receipt.eventId !== expectedId || receipt.type !== expectedType) {
+    throw new Error("Event receipt identity mismatch");
+  }
+  return receipt;
+}
+
 export function createEventReceipt(eventId, type, fields = {}, at = Date.now()) {
   return {
     schemaVersion: 1,

@@ -163,6 +163,56 @@ test("a queued goal CAS conflict recognizes committed receipts and retries when 
   globalThis.onHaminnEvent({ type: "tool.result", callId: finalReset.actions[0].callId, ok: true, result: null });
 });
 
+test("notification and timer intake CAS conflicts preserve event identity and deduplicate by typed receipt", () => {
+  const events = [
+    { type: "notification.posted", eventId: "notification-intake-cas", subscriptionId: "edt-notification",
+      sourcePackage: "com.tencent.mm", occurredAt: 1_800_000_000_000,
+      notification: { title: "合成联系人", text: "合成事件正文", category: "msg" } },
+    { type: "timer.fired", eventId: "timer-intake-cas", timerId: "edt-timer", scheduledAt: 1_800_000_000_000,
+      occurredAt: 1_800_000_000_100, missedCount: 0, scheduleRevision: 3,
+      sourceIdentity: { releaseId: "release-test", devRevision: null, trustRevision: 1 } },
+  ];
+  for (const event of events) {
+    const start = globalThis.onHaminnEvent({ type: "start" });
+    const idle = globalThis.onHaminnEvent({ type: "tool.result", callId: start.actions[0].callId, ok: true, result: null });
+    assert.equal(idle.state, "idle");
+    let output = globalThis.onHaminnEvent(event);
+    assert.equal(output.actions[0].params.key, eventReceiptKey(event.eventId));
+    output = globalThis.onHaminnEvent({ type: "tool.result", callId: output.actions[0].callId, ok: true, result: null });
+    assert.equal(output.actions[0].method, "data.batch");
+
+    const eventType = event.type === "notification.posted" ? "notification.posted" : "timer.fired";
+    const committedReceipt = { eventId: event.eventId, type: eventType, state: "received" };
+    output = globalThis.onHaminnEvent({ type: "tool.result", callId: output.actions[0].callId, ok: false,
+      error: { code: "E_CONFLICT", message: "synthetic competing intake committed the receipt" } });
+    assert.equal(output.actions[0].method, "data.get");
+    assert.equal(output.actions[0].params.key, eventReceiptKey(event.eventId));
+    const duplicate = globalThis.onHaminnEvent({ type: "tool.result", callId: output.actions[0].callId, ok: true,
+      result: { value: committedReceipt, revision: "receipt-r1" } });
+    assert.equal(duplicate.duplicate, true);
+    assert.equal(duplicate.receipt.type, eventType);
+
+    const retryEvent = { ...event, eventId: `${event.eventId}:retry` };
+    const retryStart = globalThis.onHaminnEvent({ type: "start" });
+    globalThis.onHaminnEvent({ type: "tool.result", callId: retryStart.actions[0].callId, ok: true, result: null });
+    let retry = globalThis.onHaminnEvent(retryEvent);
+    retry = globalThis.onHaminnEvent({ type: "tool.result", callId: retry.actions[0].callId, ok: true, result: null });
+    retry = globalThis.onHaminnEvent({ type: "tool.result", callId: retry.actions[0].callId, ok: false,
+      error: { code: "E_CONFLICT", message: "synthetic conflict without a committed receipt" } });
+    assert.equal(retry.actions[0].params.key, eventReceiptKey(retryEvent.eventId));
+    retry = globalThis.onHaminnEvent({ type: "tool.result", callId: retry.actions[0].callId, ok: true, result: null });
+    assert.equal(retry.actions[0].method, "data.batch");
+    const inboxWrite = retry.actions[0].params.operations.find(operation => operation.collection === "inbox");
+    assert.equal(inboxWrite.value.eventId, retryEvent.eventId);
+    assert.equal(inboxWrite.value.type, event.type);
+    globalThis.onHaminnEvent({ type: "tool.result", callId: retry.actions[0].callId, ok: true,
+      result: mockBatchResult(retry.actions[0].params) });
+  }
+
+  const reset = globalThis.onHaminnEvent({ type: "start" });
+  globalThis.onHaminnEvent({ type: "tool.result", callId: reset.actions[0].callId, ok: true, result: null });
+});
+
 test("a restored task-done decision resumes HO handoff and loads the next Task revision", () => {
   const now = Date.now();
   const first = { taskId: "task-cas-first", runId: "run-first", objective: "读取最新消息", kind: "screen-work",
