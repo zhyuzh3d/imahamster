@@ -15,6 +15,7 @@ import {
   GLOBAL_ACTION_POLL_WAIT_MS,
 } from "./ho/global-action-receipts.mjs";
 import { assertEventId, createEventReceipt, eventReceiptKey } from "./ho/events.mjs";
+import { applyCurrentOperationOutcome, ensurePendingOperationHistory, rememberPendingOperation } from "./ho/operations.mjs";
 import {
   createEventTask,
   notificationInboxKey,
@@ -241,6 +242,7 @@ function failExpiredGoal() {
     state.pendingOperation.status = "unknown";
     state.pendingOperation.error = reason;
     state.pendingOperation.updatedAt = Date.now();
+    rememberPendingOperation(state);
   }
   state.state = "failed";
   state.waiting = { reason, category: "goal-time-limit", userRequired: true, since: Date.now() };
@@ -257,6 +259,7 @@ function failExpiredGoal() {
 
 function contextText() {
   ensureGoalDeadline();
+  ensurePendingOperationHistory(state);
   if (state && !state.actionLoop && state.loop) state.actionLoop = state.loop;
   if (state) delete state.loop;
   if (state && !state.inputRecovery && state.pendingAction?.type === "input") {
@@ -347,6 +350,7 @@ function activeGoalRecord() {
     goalId, taskId, intent: "", state: "active", taskType: "unclassified", taskKind: null, step: 0, revision: 1, createdAt: now,
     lastProgressAt: now, progress: "目标已接收，等待首轮屏幕观察。", waiting: null,
     activeElapsedMs: 0, activeSegmentStartedAt: now, recoveryAttempts: 0,
+    pendingOperations: [],
   };
 }
 
@@ -1100,17 +1104,11 @@ function persistDecision(decision) {
   storeDecision(decision);
   const operations = updateGoalAndTask(decision);
   if (state.pendingOperationId) {
-    const operation = state.pendingOperation;
-    operation.status = decision.operationResult === "verified" ? "verified"
-      : decision.operationResult === "not-executed" ? "not-executed" : "unknown";
-    operation.verificationEvidence = decision.evidence;
-    operation.checkedAt = Date.now();
-    state.pendingOperation = operation;
-    if (decision.operationResult !== "unknown") state.pendingOperationId = null;
+    const operation = applyCurrentOperationOutcome(state, decision.operationResult, decision.evidence, Date.now());
     state.lastOperationResult = decision.operationResult;
     const activeIndex = operations.findIndex(item => item.collection === COLLECTION && item.key === ACTIVE_KEY);
     if (activeIndex >= 0) operations[activeIndex] = record(COLLECTION, ACTIVE_KEY, state);
-    operations.unshift(record("operations", `o:${operation.operationId}`, operation));
+    if (operation) operations.unshift(record("operations", `o:${operation.operationId}`, operation));
   }
   pending = "decision-saved";
   return action("data.batch", { operations });
@@ -1236,6 +1234,7 @@ function handleGlobalActionStatus(result) {
 
 function launchAction(a) {
   const now = Date.now();
+  if (state.pendingOperationId && state.pendingOperation) rememberPendingOperation(state);
   const operationId = `o-${state.goalId}-${state.step}-${Math.random().toString(36).slice(2, 8)}`;
   const bridgeOperationId = ["back", "home"].includes(a.type)
     ? `imhamster-${state.goalId}-${state.step}` : null;
@@ -1745,6 +1744,7 @@ globalThis.onHaminnEvent = event => {
           state.pendingOperation.status = "unknown";
           state.pendingOperation.error = reason;
           state.pendingOperation.updatedAt = Date.now();
+          rememberPendingOperation(state);
         }
         state.recoveryAttempts = Number(state.recoveryAttempts || 0) + 1;
         state.lastModelError = reason;
@@ -1773,6 +1773,7 @@ globalThis.onHaminnEvent = event => {
         state.pendingOperation.status = "unknown";
         state.pendingOperation.error = reason;
         state.pendingOperation.updatedAt = Date.now();
+        rememberPendingOperation(state);
       }
       storeDecision({ state: "stop", reason, evidence: reason });
       pending = "error-save";

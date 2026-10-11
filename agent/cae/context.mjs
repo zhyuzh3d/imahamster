@@ -1,4 +1,5 @@
 import { formatToolNames } from "../te/catalog.mjs";
+import { pendingOperationContext } from "../ho/operations.mjs";
 
 /** Assemble bounded, task-specific context for the action model request. */
 export function buildActionContext(state, {
@@ -29,15 +30,10 @@ export function buildActionContext(state, {
     ...(event.operationResult ? { operationResult: event.operationResult } : {}),
     ...(event.targeting ? { targeting: event.targeting } : {}),
   }));
-  const operation = state.pendingOperationId && state.pendingOperation
-    ? `待核实操作：${JSON.stringify({
-      operationId: state.pendingOperation.operationId,
-      status: state.pendingOperation.status,
-      kind: state.pendingOperation.kind,
-      target: String(state.pendingOperation.target || "").slice(0, 120),
-      label: state.pendingOperation.label,
-      intendedContent: String(state.pendingOperation.intendedContent || "").slice(0, 8192),
-    })}。Bridge accepted 不等于界面效果已发生。`
+  const unresolvedOperations = pendingOperationContext(state);
+  const operation = unresolvedOperations.total
+    ? `待核实操作（${unresolvedOperations.total} 项）：${JSON.stringify(unresolvedOperations.items)}。${unresolvedOperations.hiddenCount
+      ? `另有 ${unresolvedOperations.hiddenCount} 项较早未决操作仍保存在完整日志中。` : ""}Bridge accepted 不等于界面效果已发生。`
     : "";
   const deadlineAt = Number(state.goalDeadlineAt);
   const goalRemainingMinutes = Number.isFinite(deadlineAt)

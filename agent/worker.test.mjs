@@ -989,7 +989,8 @@ test("recovery gives the model pending operation details and does not replay an 
   };
   records.set("agent-runtime:active-goal", { value: active, revision: "1" });
   const provider = { baseUrl: "https://model.example", apiKey: "x".repeat(24), model: "vision-model" };
-  let prompt = "";
+  const prompts = [];
+  let actionRequests = 0;
   let taps = 0;
 
   function tool(method, params) {
@@ -1008,8 +1009,17 @@ test("recovery gives the model pending operation details and does not replay an 
       const body = JSON.parse(params.bodyText);
       const userContent = body.messages[1].content;
       const text = Array.isArray(userContent) ? userContent[0]?.text || "" : String(userContent || "");
-      if (!text.includes("在本 AL 开始任何屏幕动作前") && !text.includes("判断是否值得保存经验")) prompt = text;
-      return modelCall(params, () => ({ state: "wait", operationResult: "unknown", evidence: "截图无法确认合成消息是否已经发送", waitMs: 1000 }));
+      if (!text.includes("判断是否值得保存经验")) prompts.push(text);
+      return modelCall(params, () => {
+        if (text.includes("在本 AL 开始任何屏幕动作前")) {
+          return { estimatedMinutes: 5, budgetMinutes: 15, strategy: "核实现场并继续" };
+        }
+        if (text.includes("判断是否值得保存经验")) return { saveExperience: false, saveTool: false };
+        actionRequests += 1;
+        return actionRequests === 1
+          ? { state: "action", operationResult: "unknown", evidence: "旧发送仍无法确认，先观察合成界面", action: { type: "tap", target: "Synthetic status control", label: "刷新", x: 0.5, y: 0.5 } }
+          : { state: "done", operationResult: "verified", evidence: "当前合成状态已核对，任务完成" };
+      });
     }
     if (method === "worker.wait") return { waitedMs: params.ms };
     if (method === "interaction.tap") { taps += 1; return { accepted: true }; }
@@ -1018,7 +1028,7 @@ test("recovery gives the model pending operation details and does not replay an 
 
   function deliver(event) {
     let output = globalThis.onHaminnEvent(event);
-    for (let turn = 0; output?.actions?.length && turn < 16; turn += 1) {
+    for (let turn = 0; output?.actions?.length && turn < 64; turn += 1) {
       const call = output.actions[0];
       try { output = globalThis.onHaminnEvent({ type: "tool.result", callId: call.callId, ok: true, result: tool(call.method, call.params) }); }
       catch (error) { output = globalThis.onHaminnEvent({ type: "tool.result", callId: call.callId, ok: false, error: { message: error.message } }); }
@@ -1027,14 +1037,19 @@ test("recovery gives the model pending operation details and does not replay an 
   }
 
   const result = deliver({ type: "start" });
-  assert.equal(result.state, "waiting");
-  assert.match(prompt, /"status":"returned"/);
-  assert.match(prompt, /Synthetic contact/);
-  assert.ok(prompt.includes(intendedContent), "recovery context must preserve the full allowed draft length");
-  assert.match(prompt, /Bridge accepted 不等于界面效果已发生/);
-  assert.equal(taps, 0);
+  assert.equal(result.state, "done");
+  assert.ok(prompts.length >= 3, "the resumed task should plan, act, and then observe the new action");
+  assert.match(prompts[1], /"status":"returned"/);
+  assert.match(prompts[1], /Synthetic contact/);
+  assert.ok(prompts[1].includes(intendedContent), "recovery context must preserve the full allowed draft length");
+  assert.match(prompts[2], /operation-recovery/);
+  assert.match(prompts[2], /"status":"unknown"/);
+  assert.match(prompts[2], /Bridge accepted 不等于界面效果已发生/);
+  assert.equal(taps, 1, "the previously uncertain external send must not be replayed");
   assert.equal(records.get("operations:o:operation-recovery").value.status, "unknown");
-  assert.equal(records.get("agent-runtime:active-goal").value.pendingOperationId, "operation-recovery");
+  const recovered = records.get("agent-runtime:active-goal").value;
+  assert.equal(recovered.pendingOperationId, null);
+  assert.deepEqual(recovered.pendingOperations.map(item => item.operationId), ["operation-recovery"]);
 });
 
 test("paused goals stay paused on Worker start and accept new goals into the queue", () => {
