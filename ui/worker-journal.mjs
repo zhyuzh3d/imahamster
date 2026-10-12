@@ -76,7 +76,7 @@ export function mountWorkerJournal({ root = globalThis.document, host = () => gl
             known.add(item.key);
           }
         }
-        if (items.length) afterKey = page?.nextAfterKey || items.at(-1)?.key || afterKey;
+        if (items.length) afterKey = page?.nextAfterKey || items[items.length - 1]?.key || afterKey;
         else if (page?.nextAfterKey) afterKey = page.nextAfterKey;
         hasMore = Boolean(page?.nextAfterKey);
         pages += 1;

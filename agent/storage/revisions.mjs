@@ -32,7 +32,7 @@ function observeMissingRecord(revisions, collection, key) {
 export function prepareRevisionCheckedWrite(method, params, revisions) {
   if (!(revisions instanceof Map)) throw new TypeError("A lifecycle revision map is required");
   if (method === "data.put") {
-    if (!isTracked(params?.collection, params?.key) || Object.hasOwn(params, "expectedRevision")) return params;
+    if (!isTracked(params?.collection, params?.key) || Object.prototype.hasOwnProperty.call(params, "expectedRevision")) return params;
     const key = recordKey(params.collection, params.key);
     return revisions.has(key) ? { ...params, expectedRevision: revisions.get(key) } : params;
   }
@@ -40,7 +40,7 @@ export function prepareRevisionCheckedWrite(method, params, revisions) {
 
   let changed = false;
   const operations = params.operations.map((operation) => {
-    if (!isTracked(operation?.collection, operation?.key) || Object.hasOwn(operation, "expectedRevision")) return operation;
+    if (!isTracked(operation?.collection, operation?.key) || Object.prototype.hasOwnProperty.call(operation, "expectedRevision")) return operation;
     const key = recordKey(operation.collection, operation.key);
     if (!revisions.has(key)) return operation;
     changed = true;
@@ -54,11 +54,11 @@ export function nextUnobservedEventReceiptWrite(method, params, revisions) {
   if (!(revisions instanceof Map)) throw new TypeError("A lifecycle revision map is required");
   const operations = method === "data.put" ? [{
     op: "put", collection: params?.collection, key: params?.key,
-    ...(Object.hasOwn(params || {}, "expectedRevision") ? { expectedRevision: params.expectedRevision } : {}),
+    ...(Object.prototype.hasOwnProperty.call(params || {}, "expectedRevision") ? { expectedRevision: params.expectedRevision } : {}),
   }] : method === "data.batch" && Array.isArray(params?.operations) ? params.operations : [];
   for (const operation of operations) {
     if (operation?.collection !== "agent-runtime" || !isEventReceiptKey(operation?.key) ||
-        Object.hasOwn(operation, "expectedRevision")) continue;
+        Object.prototype.hasOwnProperty.call(operation, "expectedRevision")) continue;
     const key = recordKey(operation.collection, operation.key);
     if (!revisions.has(key)) return { collection: operation.collection, key: operation.key };
   }

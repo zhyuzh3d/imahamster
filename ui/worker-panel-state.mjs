@@ -1,5 +1,25 @@
 const TERMINAL_GOAL_STATES = new Set(["done", "failed", "cancelled"]);
 
+export function matchesPersistedGoal(active, lastResult) {
+  if (!active || typeof lastResult?.goalIntent !== "string") return false;
+  if (typeof lastResult.goalId === "string" && lastResult.goalId) return active.goalId === lastResult.goalId;
+  return active.intent === lastResult.goalIntent &&
+    Number(active.createdAt || 0) >= Number(lastResult.acceptedAt || 0) - 5000;
+}
+
+export function reconcileLastResultWithGoal(lastResult, goalRecord) {
+  const goal = goalRecord?.value;
+  if (lastResult?.status !== "running" || !goal?.goalId || goal.intent !== lastResult.goalIntent ||
+      !TERMINAL_GOAL_STATES.has(goal.state)) return null;
+  return {
+    ...lastResult,
+    goalId: goal.goalId,
+    status: goal.state,
+    summary: goal.progress || lastResult.summary || "单次目标已结束。",
+    finishedAt: Number(goal.updatedAt || 0) || Date.now(),
+  };
+}
+
 function taskGraphProgress(active) {
   const tasks = active?.taskGraph?.tasks;
   if (!Array.isArray(tasks) || tasks.length < 2 || tasks.length > 31) return null;
@@ -17,9 +37,7 @@ function taskGraphProgress(active) {
 export function deriveWorkerPanelState({ activeRecord, queuedCount = 0, serviceState, lastResult, eventTasks = [] }) {
   const active = activeRecord?.value || null;
   const liveEventTasks = eventTasks.map(item => item?.value).filter(item => item && item.state !== "cancelled");
-  const acceptedAt = Number(lastResult?.acceptedAt || 0);
-  const persistedCurrentGoal = !!active && active.intent === lastResult?.goalIntent &&
-    Number(active.createdAt || 0) >= acceptedAt - 5000;
+  const persistedCurrentGoal = matchesPersistedGoal(active, lastResult);
   const interruptedHandoff = serviceState === "failed" && lastResult?.status === "running" &&
     (!persistedCurrentGoal || !TERMINAL_GOAL_STATES.has(active?.state));
   const orphanedHandoff = interruptedHandoff && !persistedCurrentGoal;

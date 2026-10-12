@@ -1057,7 +1057,7 @@ function saveEventTaskControlResult(result) {
   if (control.command === "resume" && (control.reply || eventTask.pendingClarification)) {
     const clarifications = Array.isArray(eventTask.clarifications) ? eventTask.clarifications.slice(-9) : [];
     const clarification = control.reply || String(eventTask.pendingClarification || "");
-    if (clarification && clarifications.at(-1)?.text !== clarification) clarifications.push({ text: clarification, at: now });
+    if (clarification && clarifications[clarifications.length - 1]?.text !== clarification) clarifications.push({ text: clarification, at: now });
     eventTask.clarifications = clarifications;
     eventTask.pendingClarification = null;
     eventTask.lastQuestion = null;
@@ -1129,7 +1129,7 @@ function saveEventTaskControlTransition(eventTask) {
   const next = { ...transition.eventTask, lastControlEventId: control.eventId,
     lastControlStartedAt: now, lastControlError: null };
   if (control.command === "resume" && eventTask.state === "needs-user") {
-    control.reply ||= String(eventTask.pendingClarification || "");
+    if (!control.reply) control.reply = String(eventTask.pendingClarification || "");
     if (control.reply) next.pendingClarification = control.reply;
   }
   control.eventTask = next;
@@ -2723,7 +2723,7 @@ function advanceAfterTool(event) {
       if (!control || !eventTask || eventTask.eventTaskId !== control.eventTaskId) {
         throw new Error("事件任务控制目标不存在或身份不匹配");
       }
-      control.reply ||= String(eventTask.pendingClarification || "");
+      if (!control.reply) control.reply = String(eventTask.pendingClarification || "");
       return saveEventTaskControlTransition(eventTask);
     }
     case "event-task-control-prepared": return requestEventTaskControlEffect();
@@ -3313,13 +3313,14 @@ globalThis.onHaminnEvent = event => {
         "learning-maintenance-provider"].includes(pending);
       const modelFailure = providerFailure;
       const screenFailure = pending === "capture-result" || pending === "action-result";
+      let recoverySignal = null;
       if (screenFailure || (modelFailure && state.providerPurpose !== "learning")) {
-        const signal = recordRecoveryFailure(state, {
+        recoverySignal = recordRecoveryFailure(state, {
           stage: pending,
           category: error?.category || (modelFailure ? "model-response" : "screen-interaction"),
           code: errorCode || undefined,
         });
-        appendTrace("recovery.failure-recorded", signal);
+        appendTrace("recovery.failure-recorded", recoverySignal);
       }
       if (modelFailure && state.providerPurpose === "action" && actionLoopExpired()) {
         appendTrace("action-loop.action-request-failed-after-budget", { stage: pending, message: reason, code: errorCode || null });
@@ -3405,7 +3406,15 @@ globalThis.onHaminnEvent = event => {
             ? `连续 ${state.recoveryAttempts} 次自动恢复仍未解决`
             : "后台经验整理遇到不可自动恢复的异常"}：${reason}`);
         }
-        if (!retryable) return pauseForUser(`${reason}。检查模型/API配置后可重试。`, error?.category || "model-configuration");
+        if (screenFailure && errorCode === "E_OS_PERMISSION_DENIED" && Number(recoverySignal?.count) >= 2) {
+          return pauseForUser(`屏幕交互连续两次返回 ${errorCode}。任务和进度已保存；请检查 Haminn 屏幕交互服务、应用授权及当前页面是否允许截图，然后点击“继续”，让 LLM 根据新截图恢复。最近错误：${reason}`,
+            "system-access");
+        }
+        if (!retryable) {
+          const category = error?.category || (modelFailure ? "model-configuration" : "screen-interaction");
+          const guidance = modelFailure ? "检查模型/API 配置后可重试" : "检查相关系统能力或应用授权后可继续";
+          return pauseForUser(`${reason}。任务与进度已保留；${guidance}。`, category);
+        }
         if (state.recoveryAttempts >= MAX_RECOVERY_ATTEMPTS) {
           return pauseForUser(`连续 ${state.recoveryAttempts} 次自动恢复仍未解决：${reason}。进度已保存，可检查网络/设备后重试。`, "recovery-exhausted");
         }

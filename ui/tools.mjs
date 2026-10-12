@@ -1,3 +1,4 @@
+import { clearChildren } from "./dom.mjs";
 import { TOOL_CATALOG } from "../agent/te/catalog.mjs";
 import { normalizeToolCandidateRecord, prepareToolCandidateEdit, prepareToolCandidateState } from "../agent/te/candidate.mjs";
 import { normalizeToolRecipeRecord, prepareToolRecipeEdit, prepareToolRecipeState } from "../agent/te/recipe.mjs";
@@ -39,7 +40,7 @@ export function mountToolPanel({ root = globalThis.document, host = () => global
 
   function renderRegistered() {
     if (!registered) return;
-    registered.replaceChildren();
+    clearChildren(registered);
     for (const tool of TOOL_CATALOG) {
       const item = root.createElement("li");
       const name = root.createElement("strong");
@@ -53,7 +54,7 @@ export function mountToolPanel({ root = globalThis.document, host = () => global
 
   function renderRecipes() {
     if (!recipes) return;
-    recipes.replaceChildren();
+    clearChildren(recipes);
     for (const record of records) {
       const value = normalizeToolRecipeRecord(record, { includeInactive: true });
       if (!record?.key || !value) continue;
@@ -123,7 +124,7 @@ export function mountToolPanel({ root = globalThis.document, host = () => global
 
   function renderCandidates() {
     if (!candidates) return;
-    candidates.replaceChildren();
+    clearChildren(candidates);
     for (const record of records) {
       const value = normalizeToolCandidateRecord(record, { includeInactive: true });
       if (!record?.key || !value) continue;
@@ -205,8 +206,8 @@ export function mountToolPanel({ root = globalThis.document, host = () => global
       loaded = false;
       editingKey = "";
       deleteConfirmKey = "";
-      if (candidates) candidates.replaceChildren();
-      if (recipes) recipes.replaceChildren();
+      clearChildren(candidates);
+      clearChildren(recipes);
     }
     loading = true;
     if (refreshButton) refreshButton.disabled = true;

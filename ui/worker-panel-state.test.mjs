@@ -1,6 +1,23 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { deriveWorkerPanelState } from "./worker-panel-state.mjs";
+import { deriveWorkerPanelState, matchesPersistedGoal, reconcileLastResultWithGoal } from "./worker-panel-state.mjs";
+
+test("resumed goal identity survives a later retry timestamp and same-text goals remain distinct", () => {
+  const lastResult = { status: "running", goalIntent: "执行合成目标", goalId: "g-current", acceptedAt: 1000 };
+  assert.equal(matchesPersistedGoal({ goalId: "g-current", intent: "执行合成目标", createdAt: 1000 }, lastResult), true);
+  assert.equal(matchesPersistedGoal({ goalId: "g-next", intent: "执行合成目标", createdAt: 2000 }, lastResult), false);
+});
+
+test("a terminal source goal reconciles a stale running result after learning maintenance", () => {
+  const result = reconcileLastResultWithGoal({ status: "running", goalIntent: "执行合成目标", acceptedAt: 2000 }, {
+    value: { goalId: "g-source", intent: "执行合成目标", state: "done", progress: "LLM 判定目标完成", updatedAt: 3000 },
+  });
+  assert.deepEqual(result, { status: "done", goalIntent: "执行合成目标", acceptedAt: 2000,
+    goalId: "g-source", summary: "LLM 判定目标完成", finishedAt: 3000 });
+  assert.equal(reconcileLastResultWithGoal({ status: "running", goalIntent: "另一个目标" }, {
+    value: { goalId: "g-source", intent: "执行合成目标", state: "done" },
+  }), null);
+});
 
 test("a failed host handoff without an active-goal record stays visible and retryable", () => {
   const state = deriveWorkerPanelState({

@@ -2561,6 +2561,84 @@ test("retryable runtime bridge failures survive Worker restart and reobserve thr
   assert.equal(active.trace.some(event => event.phase === "decision" && event.decision === "stop"), false);
 });
 
+test("repeated screen permission denials wait for access repair and resume the same OST", async () => {
+  await import(`./worker.mjs?screen-access-recovery=${Date.now()}`);
+  const records = new Map();
+  const provider = { baseUrl: "https://model.example", apiKey: "x".repeat(24), model: "vision-model" };
+  let screenAccessAvailable = false;
+  let captures = 0;
+  let actionDecisions = 0;
+  let waits = 0;
+
+  function tool(method, params) {
+    if (method === "data.batch") return persistMockBatch(records, params);
+    if (method === "data.put") {
+      records.set(`${params.collection}:${params.key}`, { value: structuredClone(params.value), revision: "mock-put" });
+      return { revision: "mock-put" };
+    }
+    if (method === "data.get") return params.key === "provider"
+      ? { value: provider } : records.get(`${params.collection}:${params.key}`) || null;
+    if (method === "data.scan") return { items: [] };
+    if (method === "interaction.capture") {
+      captures += 1;
+      if (!screenAccessAvailable) {
+        throw Object.assign(new Error("请先启用 Haminn 屏幕交互服务"), {
+          code: "E_OS_PERMISSION_DENIED", retryable: true,
+        });
+      }
+      return { mime: "image/jpeg", dataBase64: "synthetic-frame" };
+    }
+    if (method === "network.request") return modelCall(params, () => {
+      actionDecisions += 1;
+      return { state: "done", evidence: "恢复屏幕访问后，LLM 根据新截图判断合成目标已完成" };
+    });
+    if (method === "worker.wait") { waits += 1; return { waitedMs: params.ms }; }
+    throw new Error(`Unexpected tool: ${method}`);
+  }
+
+  function deliver(event) {
+    let output = globalThis.onHaminnEvent(event);
+    for (let turn = 0; output?.actions?.length && turn < 64; turn += 1) {
+      const call = output.actions[0];
+      try {
+        output = globalThis.onHaminnEvent({ type: "tool.result", callId: call.callId,
+          ok: true, result: tool(call.method, call.params) });
+      } catch (error) {
+        output = globalThis.onHaminnEvent({ type: "tool.result", callId: call.callId,
+          ok: false, error: { code: error.code, retryable: error.retryable, message: error.message } });
+      }
+    }
+    return output;
+  }
+
+  assert.equal(deliver({ type: "start" }).state, "idle");
+  const firstDenial = deliver({ type: "goal.submit", intent: "完成合成任务" });
+  assert.equal(firstDenial.state, "waiting");
+  assert.equal(firstDenial.userRequired, undefined, "one transient permission check gets an automatic retry");
+  assert.equal(captures, 1);
+
+  const blocked = deliver({ type: "tick" });
+  const waiting = records.get("agent-runtime:active-goal").value;
+  assert.equal(blocked.state, "waiting");
+  assert.equal(blocked.userRequired, true);
+  assert.equal(waiting.state, "waiting", "an unavailable system permission pauses instead of failing the OST");
+  assert.equal(waiting.waiting.category, "system-access");
+  assert.match(waiting.progress, /检查 Haminn 屏幕交互服务/);
+  assert.equal(waiting.recoverySignals.categories.find(item => item.code === "e_os_permission_denied").count, 2);
+  assert.equal(captures, 2, "repeated denials stop further screenshots");
+  assert.equal(actionDecisions, 0, "the LLM is not asked to judge a screen it could not observe");
+  assert.equal(waits, 1, "only the first denial uses the short automatic retry");
+
+  screenAccessAvailable = true;
+  const resumed = deliver({ type: "goal.resume" });
+  const completed = records.get("agent-runtime:active-goal").value;
+  assert.equal(resumed.state, "done");
+  assert.equal(completed.state, "done");
+  assert.equal(captures, 3, "resuming after access repair starts with a fresh screenshot");
+  assert.equal(actionDecisions, 1, "the LLM resumes and judges the OST after it can observe again");
+  assert.equal(completed.recoverySignals.total, 2, "the access failure remains in the OST history");
+});
+
 test("post-completion queue read errors are logged and retried without reopening the completed OST", async () => {
   await import(`./worker.mjs?post-task-queue-recovery=${Date.now()}`);
   const active = { goalId: "goal-finished", taskId: "task-finished", runId: "run-finished",

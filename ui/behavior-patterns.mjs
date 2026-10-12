@@ -1,3 +1,5 @@
+import { clearChildren } from "./dom.mjs";
+
 const FIELDS = [
   { key: "title", label: "名称", maxLength: 120 },
   { key: "condition", label: "适用情境", maxLength: 240 },
@@ -73,7 +75,7 @@ export function mountBehaviorPatternsPanel({ root = globalThis.document, host = 
 
   function render() {
     if (!list) return;
-    list.replaceChildren();
+    clearChildren(list);
     for (const record of records) {
       const value = record?.value;
       if (!record?.key || value?.type !== "behavior-pattern") continue;
@@ -135,7 +137,7 @@ export function mountBehaviorPatternsPanel({ root = globalThis.document, host = 
       loaded = false;
       editingKey = "";
       deleteConfirmKey = "";
-      if (list) list.replaceChildren();
+      clearChildren(list);
     }
     loading = true;
     if (refreshButton) refreshButton.disabled = true;

@@ -1,3 +1,4 @@
+import { clearChildren } from "./dom.mjs";
 import { isRegisteredTool } from "../agent/te/catalog.mjs";
 
 export function prepareMemoryEdit(current, contentInput, objectRefsInput, updatedAt = Date.now()) {
@@ -75,7 +76,7 @@ export function mountMemoryPanel({ root = globalThis.document, host = () => glob
 
   function render() {
     if (!list) return;
-    list.replaceChildren();
+    clearChildren(list);
     for (const record of records) {
       const value = record?.value;
       if (!record?.key || !["memory", "experience"].includes(value?.type)) continue;
@@ -179,7 +180,7 @@ export function mountMemoryPanel({ root = globalThis.document, host = () => glob
       loaded = false;
       editingKey = "";
       deleteConfirmKey = "";
-      if (list) list.replaceChildren();
+      clearChildren(list);
     }
     loading = true;
     if (refreshButton) refreshButton.disabled = true;

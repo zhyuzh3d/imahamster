@@ -708,6 +708,16 @@ JS 测试适合纯状态与组装；QuickJS/Android 仪器测试负责真实模�
 - 对 `haminn_get_page_state` 的直接读取返回 `E_OPERATION_FAILED: Haminn has no foreground activity`。这将当前同步后的阻塞定位为 Haminn 没有可处理页面的前台 Activity；DEV 网络、认证、实例绑定和本地源码上传均已有服务端证据。ADB 此刻仍只枚举 API 37 模拟器，无法由本机启动手机上的 Haminn。需要手机端先显示 Haminn，或恢复 USB 调试/RSA 授权；随后再复用现有 watcher 完成 DEV 页面和 ImHamster 真机运行验证。
 - 本次只验证 Haminn DEV/运行态，不涉及目标 App 操作，不构成 ImHamster 真机、无障碍、Worker、模型或微信行为验收；不能据此标记设备验收通过，也不因此修改 ImHamster 执行逻辑。
 
+### 10.55 任务结果追溯与持续系统权限阻塞恢复（2026-10-12）
+
+- CMA-AN00 已恢复 USB 调试授权，ImHamster DEV `0.1.45 / code 46` 当前 revision 1464；`haminn_get_page_state` 确认 `ImHamster` 页面 `readyState=complete`、`visibilityState=visible`。开发诊断只有此前持续出现的 `favicon.ico` HTTP 403；watcher 的 `targetReady=false / reconnect-failed` 与服务返回 WEB_APP、可读页面状态并不一致，暂作为部署监控状态待查，不据此否定已呈现的运行页。
+- 由 ImHamster 执行一条用户授权的 `zhyuzh` 合成条件回复 OST。日志 `g-mv4n9xcc-gwr3te` / work item `t-mv4n9xcc-kilf0q-s3` / run `mv4na0hd-2-mbz16x` 的第 3 个 AL 在 step 14 记录 LLM `decision=done`；证据明确核对会话标题、触发来讯“好了么”、先前不同的我方消息、本次唯一的新消息气泡与发送后空输入框，Bridge 操作结果为 `verified`。设备截图显示唯一新增回复“ImHamster 测试仍在继续，有结果会及时同步。”，输入框为空。随后用户的新来讯不属于该 OST；本实验不代表 EDT 自动监控或自动回复已验收。
+- 真机过程还验证了成功后独立 learning-maintenance OST 完成，显示保存 4 条候选记录；尚未逐条核验其内容，也未证明后续任务正确检索使用。活动面板当前显示维护 OST，因此 UI 日志路由改为读取其 `learningMaintenance.sourceGoalId`，使原用户 OST 完整过程仍可查看。恢复时沿用稳定 `goalId` 与原始接受时间，避免人工恢复把同一语义的后续任务误配，或把已完成结果继续显示为 running；UI 只映射 HO/LLM 已保存状态，不自行判定任务结果。
+- 针对设备实际 WebView `Chrome/83`，运行源统一移除 `||=`, `.at()`, `Object.hasOwn()` 与 `Element.replaceChildren()` 依赖，并增加兼容性回归检查。控制事件投递遇到 Worker 已停止时，UI 先启动 Worker，再以同一 eventId 重试一次；其他拒绝原因不盲目重投。
+- 早先真机日志记录了 `E_OS_PERMISSION_DENIED` 在截图阶段连续返回 5 次，根因为 Haminn 屏幕交互无障碍服务关闭。该错误码也用于安全页面截图失败，不能把此码一律当成永久权限问题。因此 HO 对同一屏幕阶段的权限拒绝允许一次短暂自动恢复；第二次相同错误则持久进入 `waiting / userRequired / system-access`，保留 OST 与未决操作，停止重复截图并提示检查 Haminn 服务、应用授权和当前页面。用户恢复系统能力后重新截图，由 LLM 判断如何继续；HO 不决定操作内容或完成结果。
+- 新增集成测试覆盖两次拒绝后请求系统能力、保存任务和故障轨迹，以及权限恢复后以新截图继续原 OST 并由 LLM 判断完成。本轮全量 `node --test` 为 165/165，通过 Worker 语法检查与 `git diff --check`；当前新恢复路径已由 DEV watcher 同步到 revision 1464，但没有故意关闭设备无障碍服务做第二次破坏前置条件的真机实验。
+- 持续通知/定时 EDT、Host/Worker 进程重建后的真机续接、长期任务时限、多应用切换恢复，以及 ME/TE 候选记录的后续检索仍未验收；本节仅证明一次真实 OST 成功和一类权限阻塞的合成恢复，不关闭 U0/U1 或产品验收。
+
 ## 11. 交付与完成判定
 
 ImHamster 与 Haminn 独立提交、验证和推送；每次提交前核对各自 Git 根与 origin，保留无关工作区改动。宿主新增合同需同步 SDK/能力文档/实际实现，消费者只接入确实支持的能力。

@@ -1,3 +1,4 @@
+import { clearChildren } from "./dom.mjs";
 import { DEFAULT_IDENTITY_CORE, normalizeIdentityCoreRecord, prepareIdentityCoreEdit } from "../agent/sm/identity-core.mjs";
 
 export function mountIdentityCorePanel({ root = globalThis.document, host = () => globalThis.window?.haminn } = {}) {
@@ -47,7 +48,7 @@ export function mountIdentityCorePanel({ root = globalThis.document, host = () =
       editor.disabled = loading;
     }
     if (actions) {
-      actions.replaceChildren();
+      clearChildren(actions);
       if (editing) actions.append(actionButton("保存新版本", "save"), actionButton("取消", "cancel"));
       else actions.append(actionButton("编辑 Identity Core", "edit"));
     }

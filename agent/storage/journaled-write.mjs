@@ -19,7 +19,7 @@ export function prepareJournaledStoreWrite({
         collection: params.collection,
         key: params.key,
         value: params.value,
-        ...(Object.hasOwn(params, "expectedRevision") ? { expectedRevision: params.expectedRevision } : {}),
+        ...(Object.prototype.hasOwnProperty.call(params, "expectedRevision") ? { expectedRevision: params.expectedRevision } : {}),
       }]
     : params.operations;
 

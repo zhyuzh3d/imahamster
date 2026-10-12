@@ -2,6 +2,10 @@
   "use strict";
 
   const $ = (selector) => document.querySelector(selector);
+  const clearChildren = (element) => {
+    if (!element) return;
+    while (element.firstChild) element.removeChild(element.firstChild);
+  };
   const message = $("#message");
   const consent = $("#consent");
   const setupButton = $("#setup-action");
@@ -43,6 +47,7 @@
   let hoControlModule = null;
   let eventReceiptModule = null;
   let workerPanelStateModule = null;
+  let workerControlDeliveryModule = null;
   let selfModelPanelController = null;
   let toolPanelController = null;
   let workerJournalController = null;
@@ -785,7 +790,7 @@
   }
 
   async function loadWorkerPanelStateModule() {
-    workerPanelStateModule ||= import("./ui/worker-panel-state.mjs");
+    if (!workerPanelStateModule) workerPanelStateModule = import("./ui/worker-panel-state.mjs");
     return workerPanelStateModule;
   }
 
@@ -799,7 +804,7 @@
     workerPanel.hidden = !visible;
     if (!visible) return;
     const stateValue = displayActive?.state || "queued";
-    const goalId = String(displayActive?.goalId || "");
+    const goalId = String(displayActive?.learningMaintenance?.sourceGoalId || displayActive?.goalId || "");
     if (goalId !== workerJournalGoalId) {
       workerJournalGoalId = goalId;
       workerJournalController?.setGoalId(goalId);
@@ -885,7 +890,7 @@
 
   function renderEventTasks(items) {
     if (!workerEventTasks) return;
-    workerEventTasks.replaceChildren();
+    clearChildren(workerEventTasks);
     const current = (items || []).map(item => item?.value).filter(Boolean)
       .filter(item => item.state !== "cancelled");
     workerEventTasks.hidden = current.length === 0;
@@ -965,10 +970,15 @@
     try {
       const task = await readWorkerTaskState();
       const active = task.active?.value;
-      if (lastResult?.status === "running" && active?.state === "done" &&
-          active.intent === lastResult.goalIntent && Number(active.createdAt || 0) >= Number(lastResult.acceptedAt || 0) - 5000) {
+      const { matchesPersistedGoal, reconcileLastResultWithGoal } = await loadWorkerPanelStateModule();
+      if (lastResult?.status === "running" && active?.state === "done" && matchesPersistedGoal(active, lastResult)) {
         await saveLastResult({ ...lastResult, status: "done", summary: active.progress || "模型已判断单次目标完成。",
-          finishedAt: Number(active.updatedAt || Date.now()) });
+          goalId: active.goalId, finishedAt: Number(active.updatedAt || Date.now()) });
+      } else if (lastResult?.status === "running" && active?.learningMaintenance?.sourceGoalId &&
+          active.learningMaintenance.sourceIntent === lastResult.goalIntent) {
+        const source = await haminn.data.get({ collection: "goals", key: `g:${active.learningMaintenance.sourceGoalId}` });
+        const reconciled = reconcileLastResultWithGoal(lastResult, source);
+        if (reconciled) await saveLastResult(reconciled);
       }
       await renderWorkerPanel(task.active, task.queuedCount, task.serviceState, task.serviceError, task.eventTasks);
     } catch (_) { /* keep the last known task state during transient Bridge errors */ }
@@ -1014,12 +1024,22 @@
     return current;
   }
 
+  async function sendControlEvent(event, timeoutMessage, code) {
+    if (!workerControlDeliveryModule) workerControlDeliveryModule = import("./ui/worker-control-delivery.mjs");
+    const { dispatchControlEvent } = await workerControlDeliveryModule;
+    return dispatchControlEvent({
+      event,
+      ensureRunning: ensureWorkerRunningForControl,
+      dispatch: value => submissionCall(() => haminn.workers.dispatch({ event: value }), 5000, timeoutMessage, code),
+    });
+  }
+
   async function dispatchEventTaskControl(eventTaskId, command, reply = "", { startWorker = true } = {}) {
     const identity = { eventTaskId, command, reply: String(reply || "").trim().slice(0, 1200) };
     if (startWorker) {
       const current = await readWorkerTaskState();
       const active = current.active?.value;
-      hoControlModule ||= import("./agent/ho/control.mjs");
+      if (!hoControlModule) hoControlModule = import("./agent/ho/control.mjs");
       const { shouldFenceWorkerForEventTaskControl } = await hoControlModule;
       if (current.serviceState === "running" && shouldFenceWorkerForEventTaskControl(active, eventTaskId, command)) {
         // Stop the matching EDT or its active child OST so startup applies the durable control before resuming work.
@@ -1027,9 +1047,8 @@
       }
     }
     const eventId = await prepareDispatchEventId("event-task.control", identity);
-    const dispatched = await submissionCall(() => haminn.workers.dispatch({ event: {
-      type: "event-task.control", ...identity, eventId,
-    } }), 5000, "事件任务控制投递超时；可重新点击同一控制按钮。", "WORKER_EVENT_CONTROL_TIMEOUT");
+    const dispatched = await sendControlEvent({ type: "event-task.control", ...identity, eventId },
+      "事件任务控制投递超时；可重新点击同一控制按钮。", "WORKER_EVENT_CONTROL_TIMEOUT");
     if (!dispatched?.accepted) throw new Error(`后台 Worker 未接收事件任务控制（${dispatched?.state || "未知状态"}）。`);
     await clearDispatchEventId("event-task.control", eventId);
     if (!startWorker) return { eventId, queued: true };
@@ -1092,7 +1111,7 @@
   }
 
   async function waitForGoalControl(eventId) {
-    eventReceiptModule ||= import("./agent/ho/events.mjs");
+    if (!eventReceiptModule) eventReceiptModule = import("./agent/ho/events.mjs");
     const { eventReceiptKey } = await eventReceiptModule;
     const key = eventReceiptKey(eventId);
     const deadline = Date.now() + 12_000;
@@ -1115,9 +1134,8 @@
     const current = await haminn.workers.status();
     if (current?.state === "running") await stopWorkerAndWait();
     const eventId = await prepareDispatchEventId("goal.control", identity);
-    const dispatched = await submissionCall(() => haminn.workers.dispatch({ event: {
-      type: "goal.control", ...identity, eventId,
-    } }), 5000, "任务控制投递超时；控制事件会保留在本机，可重试。", "WORKER_GOAL_CONTROL_TIMEOUT");
+    const dispatched = await sendControlEvent({ type: "goal.control", ...identity, eventId },
+      "任务控制投递超时；控制事件会保留在本机，可重试。", "WORKER_GOAL_CONTROL_TIMEOUT");
     if (!dispatched?.accepted) throw new Error(`后台 Worker 未接收任务控制（${dispatched?.state || "未知状态"}）。`);
     await clearDispatchEventId("goal.control", eventId);
     if (!startWorker) return { eventId, queued: true };
@@ -1169,7 +1187,7 @@
       } else if (actionName === "resume") {
         const task = await readWorkerTaskState();
         let active = task.active?.value || null;
-        const { deriveWorkerPanelState } = await loadWorkerPanelStateModule();
+        const { deriveWorkerPanelState, matchesPersistedGoal } = await loadWorkerPanelStateModule();
         const interrupted = deriveWorkerPanelState({ ...task, lastResult });
         const orphanedHandoff = interrupted.orphanedHandoff;
         if (orphanedHandoff) active = null;
@@ -1214,8 +1232,7 @@
           while (Date.now() < recoveryDeadline) {
             const latest = await readWorkerTaskState();
             const candidate = latest.active?.value;
-            if (candidate && candidate.intent === lastResult?.goalIntent &&
-                Number(candidate.createdAt || 0) >= Number(lastResult?.acceptedAt || 0) - 5000) {
+            if (matchesPersistedGoal(candidate, lastResult)) {
               active = candidate;
               restored = true;
               break;
@@ -1234,7 +1251,11 @@
         const resumedIntent = control?.intent || active?.intent || lastResult?.goalIntent;
         const summary = "后台任务已继续；正在重新观察屏幕并恢复进度。";
         if (workerReplyInput) workerReplyInput.value = "";
-        await saveLastResult({ status: "running", summary, goalIntent: resumedIntent, acceptedAt: Date.now() });
+        const resumedGoalId = control?.goalId || active?.goalId || lastResult?.goalId;
+        const acceptedTimes = [lastResult?.acceptedAt, active?.createdAt].map(Number).filter(value => Number.isFinite(value) && value > 0);
+        const acceptedAt = acceptedTimes.length ? Math.min(...acceptedTimes) : Date.now();
+        await saveLastResult({ status: "running", summary, goalIntent: resumedIntent,
+          ...(resumedGoalId ? { goalId: resumedGoalId } : {}), acceptedAt });
         setMessage(summary, "success");
       }
     } catch (error) {
